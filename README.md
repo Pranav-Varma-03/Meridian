@@ -96,3 +96,76 @@ Quick Auth0 validation:
 - `make test` – run tests
 - `make db-migrate` – apply API migrations (Supabase/Postgres)
 - `make db-revision msg='name'` – create new migration
+
+## Production DB Runbook
+
+Use Alembic migrations as the **only** schema change mechanism in production.
+Do not auto-create tables at API startup.
+
+### 1) Pre-deploy checks
+
+1. Ensure target DB URL is correct and points to the intended environment.
+2. Ensure migrations are committed in repo (`apps/api/alembic/versions`).
+3. Validate migration status:
+
+```bash
+cd apps/api
+.venv/bin/alembic heads
+.venv/bin/alembic current
+```
+
+If `current` is behind `heads`, migration is required before app rollout.
+
+### 2) Standard deploy sequence (recommended)
+
+1. Deploy application artifact/container (without shifting traffic yet).
+2. Run migrations once:
+
+```bash
+make db-migrate
+```
+
+3. Verify migration revision:
+
+```bash
+cd apps/api && .venv/bin/alembic current
+```
+
+4. Start/roll traffic to new API version.
+5. Run health checks (`/health`) and smoke tests.
+
+### 3) Rollback strategy
+
+- Prefer **roll-forward** fixes for failed migrations in production.
+- Use `alembic downgrade` only when explicitly tested and data-safe.
+- If a migration fails mid-release:
+  1. Stop rollout.
+  2. Restore traffic to last healthy app version.
+  3. Repair migration and deploy a new forward migration.
+
+### 4) Zero-downtime migration rules
+
+For customer-facing releases, follow expand/contract:
+
+1. **Expand**: add nullable columns/tables/indexes first.
+2. Deploy app that writes to both old/new shape if needed.
+3. Backfill data via controlled job.
+4. **Contract**: remove old columns/constraints in a later release.
+
+Avoid destructive changes in the same release where code still depends on old schema.
+
+### 5) Practical commands (operator quick reference)
+
+```bash
+# Apply all pending migrations
+make db-migrate
+
+# Check current revision
+cd apps/api && .venv/bin/alembic current
+
+# Show latest known revision(s)
+cd apps/api && .venv/bin/alembic heads
+
+# Create a reviewed migration from model changes
+make db-revision msg='describe_change'
+```

@@ -17,35 +17,61 @@ branch_labels = None
 depends_on = None
 
 
-ingestion_status_enum = sa.Enum(
+ingestion_status_enum = postgresql.ENUM(
     "queued",
     "processing",
     "ready",
     "failed",
     name="ingestion_status",
+    create_type=False,
 )
 
-ingestion_job_status_enum = sa.Enum(
+ingestion_job_status_enum = postgresql.ENUM(
     "queued",
     "processing",
     "ready",
     "failed",
     name="ingestion_job_status",
+    create_type=False,
 )
 
-message_role_enum = sa.Enum(
+message_role_enum = postgresql.ENUM(
     "user",
     "assistant",
     "system",
     name="message_role",
+    create_type=False,
 )
 
 
 def upgrade() -> None:
-    bind = op.get_bind()
-    ingestion_status_enum.create(bind, checkfirst=True)
-    ingestion_job_status_enum.create(bind, checkfirst=True)
-    message_role_enum.create(bind, checkfirst=True)
+    op.execute(
+        """
+        DO $$ BEGIN
+            CREATE TYPE ingestion_status AS ENUM ('queued', 'processing', 'ready', 'failed');
+        EXCEPTION
+            WHEN duplicate_object THEN NULL;
+        END $$;
+        """
+    )
+    op.execute(
+        """
+        DO $$ BEGIN
+            CREATE TYPE ingestion_job_status AS ENUM ('queued', 'processing', 'ready', 'failed');
+        EXCEPTION
+            WHEN duplicate_object THEN NULL;
+        END $$;
+        """
+    )
+    op.execute(
+        """
+        DO $$ BEGIN
+            CREATE TYPE message_role AS ENUM ('user', 'assistant', 'system');
+        EXCEPTION
+            WHEN duplicate_object THEN NULL;
+        END $$;
+        """
+    )
 
     op.create_table(
         "users",
@@ -155,7 +181,6 @@ def downgrade() -> None:
     op.drop_index("ix_users_auth_subject", table_name="users")
     op.drop_table("users")
 
-    bind = op.get_bind()
-    message_role_enum.drop(bind, checkfirst=True)
-    ingestion_job_status_enum.drop(bind, checkfirst=True)
-    ingestion_status_enum.drop(bind, checkfirst=True)
+    op.execute("DROP TYPE IF EXISTS message_role")
+    op.execute("DROP TYPE IF EXISTS ingestion_job_status")
+    op.execute("DROP TYPE IF EXISTS ingestion_status")

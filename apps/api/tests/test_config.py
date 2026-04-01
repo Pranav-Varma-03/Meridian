@@ -49,8 +49,38 @@ def test_settings_reject_invalid_driver(monkeypatch: pytest.MonkeyPatch) -> None
     _set_required_env(monkeypatch)
     monkeypatch.setenv(
         "DATABASE_URL",
-        "postgresql://postgres.ref:password@aws-0-ap-south-1.pooler.supabase.com:6543/postgres?sslmode=require",
+        "mysql://user:pass@localhost:3306/db",
     )
 
     with pytest.raises(ValidationError):
         Settings()
+
+
+def test_settings_normalize_sslmode_for_asyncpg(monkeypatch: pytest.MonkeyPatch) -> None:
+    _set_required_env(monkeypatch)
+    monkeypatch.setenv(
+        "DATABASE_URL",
+        "postgresql://postgres.ref:password@aws-0-ap-south-1.pooler.supabase.com:6543/postgres?sslmode=require",
+    )
+
+    settings = Settings()
+
+    assert settings.database_url.startswith("postgresql+asyncpg://")
+    assert "ssl=require" in settings.database_url
+    assert "sslmode=require" not in settings.database_url
+
+
+def test_settings_normalize_channel_binding_for_asyncpg(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_required_env(monkeypatch)
+    monkeypatch.setenv(
+        "DATABASE_URL",
+        "postgresql://postgres.ref:password@aws-0-ap-south-1.pooler.supabase.com:6543/postgres?channel_binding=require",
+    )
+
+    settings = Settings()
+
+    assert settings.database_url.startswith("postgresql+asyncpg://")
+    assert "channel_binding=require" not in settings.database_url
+    assert "ssl=require" in settings.database_url
