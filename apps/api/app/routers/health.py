@@ -1,32 +1,32 @@
-from fastapi import APIRouter
-from datetime import datetime
-import redis.asyncio as redis
+from datetime import UTC, datetime
 
-from app.core.config import get_settings
+from fastapi import APIRouter, Request
+from sqlalchemy import text
 
 router = APIRouter()
-settings = get_settings()
 
 
 @router.get("/health")
-async def health_check():
+async def health_check(request: Request) -> dict[str, str]:
     """Health check endpoint for load balancers and monitoring."""
-    checks = {
+    checks: dict[str, str] = {
         "api": "healthy",
-        "timestamp": datetime.utcnow().isoformat(),
+        "timestamp": datetime.now(UTC).isoformat(),
     }
 
-    # Check Redis connection
     try:
-        r = redis.from_url(settings.redis_url)
-        await r.ping()
+        await request.app.state.redis.ping()
         checks["redis"] = "healthy"
-        await r.close()
     except Exception:
         checks["redis"] = "unhealthy"
 
-    # Overall status
+    try:
+        async with request.app.state.db_session_factory() as session:
+            await session.execute(text("SELECT 1"))
+        checks["database"] = "healthy"
+    except Exception:
+        checks["database"] = "unhealthy"
+
     all_healthy = all(v == "healthy" for k, v in checks.items() if k != "timestamp")
     checks["status"] = "healthy" if all_healthy else "degraded"
-
     return checks

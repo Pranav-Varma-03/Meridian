@@ -9,7 +9,7 @@
 # ═══════════════════════════════════════════════════════════════
 
 # Python virtual environment path
-VENV := apps/api/.venv
+VENV := .venv
 PYTHON := $(VENV)/bin/python
 PIP := $(VENV)/bin/pip
 UVICORN := $(VENV)/bin/uvicorn
