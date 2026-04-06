@@ -56,7 +56,9 @@ def test_settings_reject_invalid_driver(monkeypatch: pytest.MonkeyPatch) -> None
         Settings()
 
 
-def test_settings_normalize_sslmode_for_asyncpg(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_settings_normalize_sslmode_for_asyncpg(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     _set_required_env(monkeypatch)
     monkeypatch.setenv(
         "DATABASE_URL",

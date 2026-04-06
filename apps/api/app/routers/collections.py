@@ -1,21 +1,21 @@
+import uuid
+from datetime import datetime
+
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
-from datetime import datetime
-from typing import Optional
-import uuid
 
 router = APIRouter()
 
 
 class CollectionCreate(BaseModel):
     name: str
-    description: Optional[str] = None
+    description: str | None = None
 
 
 class CollectionResponse(BaseModel):
     id: str
     name: str
-    description: Optional[str]
+    description: str | None
     document_count: int
     created_at: datetime
 

@@ -28,7 +28,7 @@ class Settings(BaseSettings):
 
     # Auth0
     auth0_domain: str
-    auth0_audience: str = "https://api.meridian.app"
+    auth0_audience: str
     auth0_client_id: str
 
     # CORS
@@ -126,7 +126,9 @@ class Settings(BaseSettings):
         supported = {"CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG"}
         upper = value.upper()
         if upper not in supported:
-            raise ValueError(f"LOG_LEVEL must be one of: {', '.join(sorted(supported))}")
+            raise ValueError(
+                f"LOG_LEVEL must be one of: {', '.join(sorted(supported))}"
+            )
         return upper
 
 

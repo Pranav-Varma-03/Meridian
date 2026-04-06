@@ -13,7 +13,7 @@ from sqlalchemy import text
 
 from app.core.config import get_settings
 from app.core.database import AsyncSessionLocal, close_db, init_db
-from app.routers import chat, collections, documents, health
+from app.routers import chat, collections, documents, health, users
 
 settings = get_settings()
 
@@ -138,6 +138,7 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
         status_code=500,
     )
 
+
 # CORS
 app.add_middleware(
     CORSMiddleware,
@@ -163,6 +164,11 @@ app.include_router(
     chat.router,
     prefix=f"{settings.api_v1_prefix}/chat",
     tags=["Chat"],
+)
+app.include_router(
+    users.router,
+    prefix=f"{settings.api_v1_prefix}/users",
+    tags=["Users"],
 )
 
 

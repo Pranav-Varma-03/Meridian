@@ -1,0 +1,32 @@
+#!/bin/sh
+
+set -e
+
+echo "[pre-commit] Running Meridian quality checks..."
+
+# Backend: auto-fix + format + tests
+if [ -x "apps/api/.venv/bin/ruff" ]; then
+  echo "[pre-commit] Backend lint auto-fix (ruff)..."
+  apps/api/.venv/bin/ruff check apps/api --fix
+  apps/api/.venv/bin/ruff format apps/api
+else
+  echo "[pre-commit] WARNING: apps/api/.venv/bin/ruff not found"
+  exit 1
+fi
+
+if [ -x "apps/api/.venv/bin/pytest" ]; then
+  echo "[pre-commit] Backend tests..."
+  apps/api/.venv/bin/pytest -q
+else
+  echo "[pre-commit] WARNING: apps/api/.venv/bin/pytest not found"
+  exit 1
+fi
+
+# Frontend: type safety check
+echo "[pre-commit] Frontend typecheck..."
+pnpm --filter @meridian/web typecheck
+
+# Re-stage files if auto-fixes changed them.
+git add -A
+
+echo "[pre-commit] ✅ All checks passed"

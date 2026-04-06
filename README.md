@@ -24,6 +24,8 @@ Fill `.env` with your credentials, especially:
 - Auth values (`AUTH0_DOMAIN`, `AUTH0_AUDIENCE`, `AUTH0_CLIENT_ID`)
 - `APP_BASE_URL`
 - `AUTH0_CLIENT_SECRET`
+- `AUTH0_SECRET`
+- `API_BASE_URL` (for web→api server-side calls, e.g. `http://localhost:8000`)
 
 The web app reads Auth0 values from this same root `.env` file (no `.env.local` needed).
 The web scripts also disable Next telemetry in dev/build/start to avoid network timeout noise in restricted networks.
@@ -48,6 +50,16 @@ AUTH0_CLIENT_SECRET=your-auth0-client-secret
 AUTH0_SECRET=<generate with: openssl rand -hex 32>
 AUTH0_AUDIENCE=https://api.meridian.app
 ```
+
+Important for API connectivity/user provisioning:
+
+- In Auth0, create/configure an **API** with identifier matching `AUTH0_AUDIENCE`.
+- Access tokens used by the web app must have:
+  - `aud` = your `AUTH0_AUDIENCE`
+  - `iss` = `https://<AUTH0_DOMAIN>/`
+
+After login/signup, the web app calls `POST /api/v1/users/me` with the Auth0 access token.
+That endpoint verifies JWT and upserts the user into Postgres (`users` table).
 
 2. Install dependencies:
 
@@ -96,6 +108,27 @@ Quick Auth0 validation:
 - `make test` – run tests
 - `make db-migrate` – apply API migrations (Supabase/Postgres)
 - `make db-revision msg='name'` – create new migration
+
+## Commit-time quality checks (auto-run on `git commit`)
+
+This repo uses a git pre-commit hook to enforce baseline quality automatically.
+
+What runs on each commit:
+
+- Backend lint auto-fix: `ruff check --fix`
+- Backend format: `ruff format`
+- Backend tests: `pytest -q`
+- Frontend typecheck: `pnpm --filter @meridian/web typecheck`
+
+Setup (one-time per clone):
+
+```bash
+cd /Users/pranav/Desktop/RAG/Meridian
+pnpm install
+pnpm run prepare
+```
+
+If any check fails, commit is blocked until fixed.
 
 ## Production DB Runbook
 

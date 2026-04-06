@@ -1,16 +1,16 @@
+import json
+
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-from typing import Optional
-import json
 
 router = APIRouter()
 
 
 class ChatRequest(BaseModel):
     query: str
-    conversation_id: Optional[str] = None
-    collection_ids: Optional[list[str]] = None  # If None, search all collections
+    conversation_id: str | None = None
+    collection_ids: list[str] | None = None  # If None, search all collections
 
 
 class ChatResponse(BaseModel):

@@ -27,6 +27,11 @@ AsyncSessionLocal = async_sessionmaker(
 )
 
 
+async def get_db_session():
+    async with AsyncSessionLocal() as session:
+        yield session
+
+
 async def init_db() -> None:
     """Warm up the DB engine and verify connectivity via app startup checks."""
     return None

@@ -1,8 +1,8 @@
-from fastapi import APIRouter, UploadFile, File, HTTPException, Depends
-from pydantic import BaseModel
-from datetime import datetime
-from typing import Optional
 import uuid
+from datetime import datetime
+
+from fastapi import APIRouter, File, HTTPException, UploadFile
+from pydantic import BaseModel
 
 router = APIRouter()
 
@@ -11,9 +11,9 @@ class DocumentResponse(BaseModel):
     id: str
     filename: str
     status: str  # "queued" | "processing" | "ready" | "failed"
-    collection_id: Optional[str] = None
+    collection_id: str | None = None
     created_at: datetime
-    chunk_count: Optional[int] = None
+    chunk_count: int | None = None
     file_size: int
 
 
@@ -25,7 +25,7 @@ class DocumentListResponse(BaseModel):
 @router.post("/upload", response_model=dict)
 async def upload_document(
     file: UploadFile = File(...),
-    collection_id: Optional[str] = None,
+    collection_id: str | None = None,
 ):
     """
     Upload a document for processing.
@@ -41,7 +41,7 @@ async def upload_document(
     if file.content_type not in allowed_types:
         raise HTTPException(
             status_code=400,
-            detail=f"File type not supported. Allowed: PDF, DOCX, TXT",
+            detail="File type not supported. Allowed: PDF, DOCX, TXT",
         )
 
     # Validate file size (10MB)
@@ -66,7 +66,7 @@ async def upload_document(
 
 @router.get("", response_model=DocumentListResponse)
 async def list_documents(
-    collection_id: Optional[str] = None,
+    collection_id: str | None = None,
     limit: int = 50,
     offset: int = 0,
 ):
