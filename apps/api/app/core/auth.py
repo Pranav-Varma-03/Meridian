@@ -4,7 +4,8 @@ import time
 from typing import Any
 
 import httpx
-from fastapi import HTTPException, Request, status
+from fastapi import HTTPException, Request, Security, status
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jose import JWTError, jwt
 
 from app.core.config import get_settings
@@ -14,6 +15,7 @@ logger = logging.getLogger(__name__)
 
 _jwks_cache: dict[str, Any] = {"keys": None, "expires_at": 0.0}
 _jwks_lock = asyncio.Lock()
+bearer_scheme = HTTPBearer(auto_error=False)
 
 
 async def _get_jwks() -> dict[str, Any]:
@@ -99,6 +101,12 @@ async def verify_auth0_access_token(token: str) -> dict[str, Any]:
     return claims
 
 
-async def get_current_user_claims(request: Request) -> dict[str, Any]:
-    token = _extract_bearer_token(request)
+async def get_current_user_claims(
+    request: Request,
+    credentials: HTTPAuthorizationCredentials | None = Security(bearer_scheme),
+) -> dict[str, Any]:
+    if credentials is not None and credentials.scheme.lower() == "bearer":
+        token = credentials.credentials
+    else:
+        token = _extract_bearer_token(request)
     return await verify_auth0_access_token(token)

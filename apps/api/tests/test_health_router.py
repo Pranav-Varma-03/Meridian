@@ -50,9 +50,9 @@ async def test_health_check_healthy() -> None:
 
     result = await health_check(request)
 
-    assert result["status"] == "healthy"
-    assert result["redis"] == "healthy"
-    assert result["database"] == "healthy"
+    assert result.status == "healthy"
+    assert result.redis == "healthy"
+    assert result.database == "healthy"
 
 
 @pytest.mark.asyncio
@@ -61,6 +61,6 @@ async def test_health_check_degraded_when_dependencies_fail() -> None:
 
     result = await health_check(request)
 
-    assert result["status"] == "degraded"
-    assert result["redis"] == "unhealthy"
-    assert result["database"] == "unhealthy"
+    assert result.status == "degraded"
+    assert result.redis == "unhealthy"
+    assert result.database == "unhealthy"

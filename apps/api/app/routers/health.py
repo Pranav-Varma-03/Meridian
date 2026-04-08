@@ -1,13 +1,43 @@
 from datetime import UTC, datetime
 
 from fastapi import APIRouter, Request
+from pydantic import BaseModel, ConfigDict
 from sqlalchemy import text
+
+from app.schemas import INTERNAL_ERROR_RESPONSE
 
 router = APIRouter()
 
 
-@router.get("/health")
-async def health_check(request: Request) -> dict[str, str]:
+class HealthResponse(BaseModel):
+    api: str
+    redis: str
+    database: str
+    status: str
+    timestamp: str
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "api": "healthy",
+                "redis": "healthy",
+                "database": "healthy",
+                "status": "healthy",
+                "timestamp": "2026-04-08T09:30:00+00:00",
+            }
+        }
+    )
+
+
+@router.get(
+    "/health",
+    response_model=HealthResponse,
+    status_code=200,
+    summary="Service health check",
+    description="Returns API, Redis, and database health for monitoring and load balancers.",
+    responses={500: INTERNAL_ERROR_RESPONSE},
+)
+async def health_check(request: Request) -> HealthResponse:
     """Health check endpoint for load balancers and monitoring."""
     checks: dict[str, str] = {
         "api": "healthy",
@@ -29,4 +59,4 @@ async def health_check(request: Request) -> dict[str, str]:
 
     all_healthy = all(v == "healthy" for k, v in checks.items() if k != "timestamp")
     checks["status"] = "healthy" if all_healthy else "degraded"
-    return checks
+    return HealthResponse(**checks)
