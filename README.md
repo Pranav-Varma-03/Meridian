@@ -84,6 +84,23 @@ Open:
 - Frontend: `http://localhost:3000`
 - API docs: `http://localhost:8000/docs`
 
+## Collections API (implemented)
+
+`/api/v1/collections` endpoints are now fully DB-backed and user-scoped:
+
+- `POST /api/v1/collections`
+- `GET /api/v1/collections`
+- `GET /api/v1/collections/{collection_id}`
+- `PATCH /api/v1/collections/{collection_id}`
+- `DELETE /api/v1/collections/{collection_id}`
+
+Notes:
+
+- All collection routes require Auth0 bearer token auth.
+- Collection names are enforced as unique per user (case-insensitive).
+- List/detail responses include `document_count`.
+- Delete returns `200` with `{ "message": "Collection deleted" }`.
+
 Auth endpoints provided by the SDK:
 
 - `http://localhost:3000/auth/login`

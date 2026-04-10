@@ -4,11 +4,15 @@ import time
 from typing import Any
 
 import httpx
-from fastapi import HTTPException, Request, Security, status
+from fastapi import Depends, HTTPException, Request, Security, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jose import JWTError, jwt
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
+from app.core.database import get_db_session
+from app.models.entities import User
+from app.services.users import InvalidUserClaimsError, ensure_user_from_claims
 
 settings = get_settings()
 logger = logging.getLogger(__name__)
@@ -109,4 +113,19 @@ async def get_current_user_claims(
         token = credentials.credentials
     else:
         token = _extract_bearer_token(request)
+
+    # Development-only debug output (requested): print bearer token with
+    # one empty line above and one empty line below.
+    print(f"\n{token}\n")
+
     return await verify_auth0_access_token(token)
+
+
+async def get_current_user(
+    claims: dict[str, Any] = Depends(get_current_user_claims),
+    session: AsyncSession = Depends(get_db_session),
+) -> User:
+    try:
+        return await ensure_user_from_claims(session, claims)
+    except InvalidUserClaimsError as exc:
+        raise HTTPException(status_code=401, detail=str(exc)) from exc

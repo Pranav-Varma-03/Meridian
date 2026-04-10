@@ -1,4 +1,5 @@
 import os
+import types
 import uuid
 from datetime import UTC, datetime
 
@@ -18,9 +19,10 @@ os.environ.setdefault("AUTH0_DOMAIN", "example.auth0.com")
 os.environ.setdefault("AUTH0_AUDIENCE", "https://api.example.com")
 os.environ.setdefault("AUTH0_CLIENT_ID", "test-client-id")
 
-from app.core.auth import get_current_user_claims
+from app.core.auth import get_current_user
 from app.core.database import get_db_session
 from app.main import app
+from app.services import collections as collection_service
 
 
 @pytest_asyncio.fixture
@@ -55,17 +57,42 @@ async def test_users_me_unauthorized_error_envelope(api_client: AsyncClient) -> 
 
 
 @pytest.mark.asyncio
-async def test_collections_create_contract_response(api_client: AsyncClient) -> None:
-    response = await api_client.post(
-        "/api/v1/collections",
-        json={"name": "Product Docs", "description": "Team docs"},
-    )
+async def test_collections_create_contract_response(
+    api_client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def _current_user_override():
+        return types.SimpleNamespace(id=uuid.uuid4())
 
-    assert response.status_code == 201
-    body = response.json()
-    assert body["name"] == "Product Docs"
-    assert "id" in body
-    assert "created_at" in body
+    async def _db_override():
+        yield object()
+
+    async def _create(_session, *, user_id, name, description):
+        collection = types.SimpleNamespace(
+            id=uuid.uuid4(),
+            name=name,
+            description=description,
+            created_at=datetime.now(UTC),
+        )
+        return types.SimpleNamespace(collection=collection, document_count=0)
+
+    monkeypatch.setattr(collection_service, "create_collection", _create)
+    app.dependency_overrides[get_current_user] = _current_user_override
+    app.dependency_overrides[get_db_session] = _db_override
+
+    try:
+        response = await api_client.post(
+            "/api/v1/collections",
+            json={"name": "Product Docs", "description": "Team docs"},
+        )
+
+        assert response.status_code == 201
+        body = response.json()
+        assert body["name"] == "Product Docs"
+        assert "id" in body
+        assert "created_at" in body
+    finally:
+        app.dependency_overrides.clear()
 
 
 @pytest.mark.asyncio
@@ -102,48 +129,19 @@ async def test_chat_sse_contract_shape(api_client: AsyncClient) -> None:
     assert '"type": "done"' in response.text
 
 
-class _DummyResult:
-    def __init__(self, user):
-        self._user = user
-
-    def scalar_one_or_none(self):
-        return self._user
-
-
-class _DummySession:
-    def __init__(self):
-        self.user = None
-
-    async def execute(self, _query):
-        return _DummyResult(self.user)
-
-    def add(self, user):
-        self.user = user
-
-    async def commit(self):
-        return None
-
-    async def refresh(self, user):
-        if user.id is None:
-            user.id = uuid.uuid4()
-        if user.created_at is None:
-            user.created_at = datetime.now(UTC)
-
-
-async def _claims_override():
-    return {"sub": "auth0|integration-user", "email": "integration@example.com"}
-
-
-async def _db_override():
-    yield _DummySession()
-
-
 @pytest.mark.asyncio
 async def test_users_me_provision_success_with_dependency_overrides(
     api_client: AsyncClient,
 ) -> None:
-    app.dependency_overrides[get_current_user_claims] = _claims_override
-    app.dependency_overrides[get_db_session] = _db_override
+    async def _current_user_override():
+        return types.SimpleNamespace(
+            id=uuid.uuid4(),
+            auth_subject="auth0|integration-user",
+            email="integration@example.com",
+            created_at=datetime.now(UTC),
+        )
+
+    app.dependency_overrides[get_current_user] = _current_user_override
 
     try:
         response = await api_client.post("/api/v1/users/me")
