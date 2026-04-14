@@ -13,6 +13,10 @@ os.environ.setdefault(
     "postgresql+asyncpg://postgres.ref:password@aws-0-ap-south-1.pooler.supabase.com:6543/postgres?sslmode=require",
 )
 os.environ.setdefault("REDIS_URL", "redis://localhost:6379")
+os.environ.setdefault("INGESTION_QUEUE_KEY", "ingestion:jobs")
+os.environ.setdefault("INGESTION_WORKER_DEQUEUE_TIMEOUT_SECONDS", "5")
+os.environ.setdefault("INGESTION_WORKER_MAX_ATTEMPTS", "3")
+os.environ.setdefault("INGESTION_WORKER_IDLE_SLEEP_SECONDS", "1.0")
 os.environ.setdefault("OPENAI_API_KEY", "test-openai-key")
 os.environ.setdefault("PINECONE_API_KEY", "test-pinecone-key")
 os.environ.setdefault("AUTH0_DOMAIN", "example.auth0.com")
@@ -23,6 +27,7 @@ from app.core.auth import get_current_user
 from app.core.database import get_db_session
 from app.main import app
 from app.services import collections as collection_service
+from app.services import documents as document_service
 
 
 @pytest_asyncio.fixture
@@ -42,6 +47,8 @@ async def test_openapi_contract_status_codes(api_client: AsyncClient) -> None:
     assert paths["/api/v1/collections"]["post"]["responses"].get("201")
     assert paths["/api/v1/documents/upload"]["post"]["responses"].get("202")
     assert paths["/api/v1/documents/{document_id}"]["delete"]["responses"].get("200")
+    assert paths["/api/v1/ingest"]["post"]["responses"].get("202")
+    assert paths["/api/v1/ingest/{job_id}"]["get"]["responses"].get("200")
     assert paths["/api/v1/chat"]["post"]["responses"].get("200")
 
 
@@ -97,27 +104,60 @@ async def test_collections_create_contract_response(
 
 @pytest.mark.asyncio
 async def test_documents_upload_contract_accepts_txt(api_client: AsyncClient) -> None:
+    async def _current_user_override():
+        return types.SimpleNamespace(id=uuid.uuid4())
+
+    async def _db_override():
+        yield object()
+
+    async def _create_upload(_session, **_kwargs):
+        return types.SimpleNamespace(
+            document=types.SimpleNamespace(filename="notes.txt"),
+            job=types.SimpleNamespace(id=uuid.uuid4()),
+        )
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(document_service, "create_uploaded_document", _create_upload)
+    app.dependency_overrides[get_current_user] = _current_user_override
+    app.dependency_overrides[get_db_session] = _db_override
+
     files = {"file": ("notes.txt", b"hello world", "text/plain")}
 
-    response = await api_client.post("/api/v1/documents/upload", files=files)
+    try:
+        response = await api_client.post("/api/v1/documents/upload", files=files)
 
-    assert response.status_code == 202
-    body = response.json()
-    assert body["status"] == "queued"
-    assert body["job_id"]
+        assert response.status_code == 202
+        body = response.json()
+        assert body["status"] == "queued"
+        assert body["job_id"]
+    finally:
+        monkeypatch.undo()
+        app.dependency_overrides.clear()
 
 
 @pytest.mark.asyncio
 async def test_documents_upload_rejects_unsupported_type(
     api_client: AsyncClient,
 ) -> None:
+    async def _current_user_override():
+        return types.SimpleNamespace(id=uuid.uuid4())
+
+    async def _db_override():
+        yield object()
+
+    app.dependency_overrides[get_current_user] = _current_user_override
+    app.dependency_overrides[get_db_session] = _db_override
+
     files = {"file": ("image.png", b"binary", "image/png")}
 
-    response = await api_client.post("/api/v1/documents/upload", files=files)
+    try:
+        response = await api_client.post("/api/v1/documents/upload", files=files)
 
-    assert response.status_code == 400
-    payload = response.json()
-    assert payload["error"]["code"] == "HTTP_ERROR"
+        assert response.status_code == 415
+        payload = response.json()
+        assert payload["error"]["code"] == "HTTP_ERROR"
+    finally:
+        app.dependency_overrides.clear()
 
 
 @pytest.mark.asyncio

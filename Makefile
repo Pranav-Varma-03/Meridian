@@ -1,4 +1,4 @@
-.PHONY: setup dev dev-api dev-web install test lint format db-migrate clean
+.PHONY: setup dev dev-api dev-web dev-worker install test lint format db-migrate clean
 
 # ═══════════════════════════════════════════════════════════════
 # Meridian RAG System - Makefile
@@ -40,6 +40,10 @@ dev:
 # Start backend only (uses local venv)
 dev-api:
 	cd apps/api && .venv/bin/uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+
+# Start ingestion worker only (uses local venv)
+dev-worker:
+	cd apps/api && .venv/bin/python -m app.services.ingestion_worker_runner
 
 # Start frontend only (uses local node_modules)
 dev-web:
@@ -142,6 +146,7 @@ help:
 	@echo "  make dev        - Start frontend + backend"
 	@echo "  make dev-api    - Start backend only"
 	@echo "  make dev-web    - Start frontend only"
+	@echo "  make dev-worker - Start ingestion worker only"
 	@echo ""
 	@echo "Testing:"
 	@echo "  make test       - Run all tests"

@@ -73,6 +73,12 @@ make setup
 make dev
 ```
 
+To run ingestion worker separately (recommended in local dev):
+
+```bash
+make dev-worker
+```
+
 4. Run API migrations:
 
 ```bash
@@ -100,6 +106,28 @@ Notes:
 - Collection names are enforced as unique per user (case-insensitive).
 - List/detail responses include `document_count`.
 - Delete returns `200` with `{ "message": "Collection deleted" }`.
+
+## Documents + Ingestion APIs (implemented)
+
+`/api/v1/documents` now includes DB-backed, user-scoped metadata endpoints:
+
+- `POST /api/v1/documents/upload`
+- `GET /api/v1/documents`
+- `GET /api/v1/documents/{document_id}`
+- `DELETE /api/v1/documents/{document_id}`
+
+`/api/v1/ingest` lifecycle endpoints are also available:
+
+- `POST /api/v1/ingest` (queue ingestion for an existing document)
+- `GET /api/v1/ingest/{job_id}` (fetch ingestion job status)
+
+Notes:
+
+- Document upload creates both a `documents` record and an `ingestion_jobs` record in `queued` state.
+- Upload validations enforce supported MIME types (PDF/DOCX/TXT) and max size of 10MB.
+- `POST /api/v1/ingest` is idempotent for active jobs: if the latest job for a document is already `queued`/`processing`, the API returns that existing job instead of creating a duplicate.
+- Uploaded/manual-ingest jobs are pushed to Redis queue (`INGESTION_QUEUE_KEY`) and consumed by background worker.
+- All document and ingestion operations are authenticated and scoped to the current user.
 
 Auth endpoints provided by the SDK:
 

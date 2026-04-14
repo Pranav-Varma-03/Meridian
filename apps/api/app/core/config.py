@@ -18,6 +18,10 @@ class Settings(BaseSettings):
 
     # Redis
     redis_url: str
+    ingestion_queue_key: str
+    ingestion_worker_dequeue_timeout_seconds: int
+    ingestion_worker_max_attempts: int
+    ingestion_worker_idle_sleep_seconds: float
 
     # OpenAI
     openai_api_key: str

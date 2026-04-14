@@ -13,6 +13,10 @@ os.environ.setdefault(
     "postgresql+asyncpg://postgres.ref:password@aws-0-ap-south-1.pooler.supabase.com:6543/postgres?sslmode=require",
 )
 os.environ.setdefault("REDIS_URL", "redis://localhost:6379")
+os.environ.setdefault("INGESTION_QUEUE_KEY", "ingestion:jobs")
+os.environ.setdefault("INGESTION_WORKER_DEQUEUE_TIMEOUT_SECONDS", "5")
+os.environ.setdefault("INGESTION_WORKER_MAX_ATTEMPTS", "3")
+os.environ.setdefault("INGESTION_WORKER_IDLE_SLEEP_SECONDS", "1.0")
 os.environ.setdefault("OPENAI_API_KEY", "test-openai-key")
 os.environ.setdefault("PINECONE_API_KEY", "test-pinecone-key")
 os.environ.setdefault("AUTH0_DOMAIN", "example.auth0.com")

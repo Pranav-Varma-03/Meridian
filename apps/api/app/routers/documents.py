@@ -1,9 +1,15 @@
+import logging
 import uuid
 from datetime import datetime
 
-from fastapi import APIRouter, File, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile
 from pydantic import BaseModel, ConfigDict
+from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.auth import get_current_user
+from app.core.config import get_settings
+from app.core.database import get_db_session
+from app.models.entities import User
 from app.schemas import (
     INTERNAL_ERROR_RESPONSE,
     NOT_FOUND_RESPONSE,
@@ -12,8 +18,19 @@ from app.schemas import (
     UNSUPPORTED_MEDIA_RESPONSE,
     VALIDATION_ERROR_RESPONSE,
 )
+from app.services import documents as document_service
+from app.services import ingestion_worker as ingestion_worker_service
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
+settings = get_settings()
+
+MAX_UPLOAD_BYTES = 10 * 1024 * 1024
+ALLOWED_MIME_TYPES = {
+    "application/pdf",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "text/plain",
+}
 
 
 class DocumentResponse(BaseModel):
@@ -92,6 +109,7 @@ class MessageResponse(BaseModel):
     description="Accepts a document upload and enqueues async ingestion.",
     responses={
         401: UNAUTHORIZED_RESPONSE,
+        404: NOT_FOUND_RESPONSE,
         413: PAYLOAD_TOO_LARGE_RESPONSE,
         415: UNSUPPORTED_MEDIA_RESPONSE,
         422: VALIDATION_ERROR_RESPONSE,
@@ -99,44 +117,70 @@ class MessageResponse(BaseModel):
     },
 )
 async def upload_document(
+    request: Request,
     file: UploadFile = File(...),
-    collection_id: str | None = None,
+    collection_id: uuid.UUID | None = None,
+    current_user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_db_session),
 ):
     """
     Upload a document for processing.
     Supports: PDF, DOCX, TXT (max 10MB)
     Returns immediately with a job_id for async processing.
     """
-    # Validate file type
-    allowed_types = [
-        "application/pdf",
-        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        "text/plain",
-    ]
-    if file.content_type not in allowed_types:
+    if file.content_type not in ALLOWED_MIME_TYPES:
         raise HTTPException(
-            status_code=400,
+            status_code=415,
             detail="File type not supported. Allowed: PDF, DOCX, TXT",
         )
 
-    # Validate file size (10MB)
     contents = await file.read()
-    if len(contents) > 10 * 1024 * 1024:
-        raise HTTPException(status_code=400, detail="File too large. Max: 10MB")
+    if len(contents) > MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail="File too large. Max: 10MB")
 
-    # Generate job ID and queue for processing
-    job_id = str(uuid.uuid4())
+    try:
+        result = await document_service.create_uploaded_document(
+            session,
+            user_id=current_user.id,
+            filename=file.filename or "uploaded-file",
+            mime_type=file.content_type,
+            file_bytes=contents,
+            collection_id=collection_id,
+        )
+    except document_service.CollectionNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
-    # TODO: Queue document for async processing via BullMQ
-    # TODO: Upload raw file to S3
-    # TODO: Create document record in DB
+    redis_client = getattr(request.app.state, "redis", None)
+    if redis_client is None:
+        logger.warning(
+            "Redis client unavailable; ingestion job not pushed to queue",
+            extra={
+                "job_id": str(result.job.id),
+                "document_id": str(getattr(result.document, "id", "unknown")),
+            },
+        )
+    else:
+        try:
+            await ingestion_worker_service.enqueue_ingestion_job(
+                redis_client,
+                queue_key=settings.ingestion_queue_key,
+                job_id=result.job.id,
+            )
+        except Exception:
+            logger.exception(
+                "Failed to enqueue ingestion job to Redis",
+                extra={
+                    "job_id": str(result.job.id),
+                    "document_id": str(getattr(result.document, "id", "unknown")),
+                },
+            )
 
-    return {
-        "job_id": job_id,
-        "filename": file.filename,
-        "status": "queued",
-        "message": "Document queued for processing",
-    }
+    return DocumentUploadAccepted(
+        job_id=str(result.job.id),
+        filename=result.document.filename,
+        status="queued",
+        message="Document queued for processing",
+    )
 
 
 @router.get(
@@ -147,18 +191,49 @@ async def upload_document(
     description="Returns paginated documents for the authenticated user.",
     responses={
         401: UNAUTHORIZED_RESPONSE,
+        404: NOT_FOUND_RESPONSE,
         422: VALIDATION_ERROR_RESPONSE,
         500: INTERNAL_ERROR_RESPONSE,
     },
 )
 async def list_documents(
-    collection_id: str | None = None,
-    limit: int = 50,
-    offset: int = 0,
+    collection_id: uuid.UUID | None = None,
+    limit: int = Query(default=50, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+    current_user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_db_session),
 ):
     """List all documents for the authenticated user."""
-    # TODO: Fetch from database with user_id filter
-    return DocumentListResponse(documents=[], total=0)
+    try:
+        documents, total = await document_service.list_documents(
+            session,
+            user_id=current_user.id,
+            collection_id=collection_id,
+            limit=limit,
+            offset=offset,
+        )
+    except document_service.CollectionNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    return DocumentListResponse(
+        documents=[
+            DocumentResponse(
+                id=str(item.document.id),
+                filename=item.document.filename,
+                status=item.document.status.value,
+                collection_id=(
+                    str(item.document.collection_id)
+                    if item.document.collection_id is not None
+                    else None
+                ),
+                created_at=item.document.created_at,
+                chunk_count=item.chunk_count,
+                file_size=item.document.file_size,
+            )
+            for item in documents
+        ],
+        total=total,
+    )
 
 
 @router.get(
@@ -174,10 +249,34 @@ async def list_documents(
         500: INTERNAL_ERROR_RESPONSE,
     },
 )
-async def get_document(document_id: str):
+async def get_document(
+    document_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_db_session),
+):
     """Get document details and processing status."""
-    # TODO: Fetch from database
-    raise HTTPException(status_code=404, detail="Document not found")
+    try:
+        result = await document_service.get_document(
+            session,
+            user_id=current_user.id,
+            document_id=document_id,
+        )
+    except document_service.DocumentNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    return DocumentResponse(
+        id=str(result.document.id),
+        filename=result.document.filename,
+        status=result.document.status.value,
+        collection_id=(
+            str(result.document.collection_id)
+            if result.document.collection_id is not None
+            else None
+        ),
+        created_at=result.document.created_at,
+        chunk_count=result.chunk_count,
+        file_size=result.document.file_size,
+    )
 
 
 @router.delete(
@@ -193,12 +292,22 @@ async def get_document(document_id: str):
         500: INTERNAL_ERROR_RESPONSE,
     },
 )
-async def delete_document(document_id: str):
+async def delete_document(
+    document_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_db_session),
+):
     """
     Delete a document and all associated chunks/embeddings.
     Also removes from vector store and file storage.
     """
-    # TODO: Delete from DB (cascades to chunks)
-    # TODO: Delete from Pinecone
-    # TODO: Delete from S3
-    return {"message": "Document deleted successfully"}
+    try:
+        await document_service.delete_document(
+            session,
+            user_id=current_user.id,
+            document_id=document_id,
+        )
+    except document_service.DocumentNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    return MessageResponse(message="Document deleted successfully")

@@ -13,7 +13,7 @@ from sqlalchemy import text
 
 from app.core.config import get_settings
 from app.core.database import AsyncSessionLocal, close_db, init_db
-from app.routers import chat, collections, documents, health, users
+from app.routers import chat, collections, documents, health, ingest, users
 
 settings = get_settings()
 
@@ -169,6 +169,11 @@ app.include_router(
     users.router,
     prefix=f"{settings.api_v1_prefix}/users",
     tags=["Users"],
+)
+app.include_router(
+    ingest.router,
+    prefix=f"{settings.api_v1_prefix}/ingest",
+    tags=["Ingestion"],
 )
 
 
