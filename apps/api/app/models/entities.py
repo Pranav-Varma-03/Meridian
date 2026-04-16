@@ -11,7 +11,6 @@ from sqlalchemy import (
     String,
     Text,
     func,
-    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -83,19 +82,10 @@ class Document(Base):
     __tablename__ = "documents"
     __table_args__ = (
         Index(
-            "uq_documents_user_file_hash_no_collection",
+            "uq_documents_user_file_hash",
             "user_id",
             "file_hash",
             unique=True,
-            postgresql_where=text("collection_id IS NULL"),
-        ),
-        Index(
-            "uq_documents_user_collection_file_hash",
-            "user_id",
-            "collection_id",
-            "file_hash",
-            unique=True,
-            postgresql_where=text("collection_id IS NOT NULL"),
         ),
     )
 

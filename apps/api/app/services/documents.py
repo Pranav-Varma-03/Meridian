@@ -61,19 +61,11 @@ async def create_uploaded_document(
     file_hash = hashlib.sha256(file_bytes).hexdigest()
 
     async def _existing_upload_result() -> UploadResult | None:
-        duplicate_filters = [
-            Document.user_id == user_id,
-            Document.file_hash == file_hash,
-        ]
-        if collection_id is None:
-            duplicate_filters.append(Document.collection_id.is_(None))
-        else:
-            duplicate_filters.append(Document.collection_id == collection_id)
-
         existing_document = await session.scalar(
-            select(Document)
-            .where(*duplicate_filters)
-            .order_by(Document.created_at.desc())
+            select(Document).where(
+                Document.user_id == user_id,
+                Document.file_hash == file_hash,
+            )
         )
         if existing_document is None:
             return None
