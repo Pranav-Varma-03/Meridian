@@ -1,17 +1,19 @@
+import json
 from functools import lru_cache
+from typing import Annotated
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from pydantic import field_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
 class Settings(BaseSettings):
     # App
-    app_name: str = "Meridian API"
-    environment: str = "development"
-    debug: bool = False
-    api_v1_prefix: str = "/api/v1"
-    log_level: str = "INFO"
+    app_name: str
+    environment: str
+    debug: bool
+    api_v1_prefix: str
+    log_level: str
 
     # Database
     database_url: str
@@ -28,7 +30,7 @@ class Settings(BaseSettings):
 
     # Pinecone
     pinecone_api_key: str
-    pinecone_index_name: str = "rag-documents"
+    pinecone_index_name: str
 
     # Auth0
     auth0_domain: str
@@ -36,7 +38,7 @@ class Settings(BaseSettings):
     auth0_client_id: str
 
     # CORS
-    cors_origins: list[str] = ["http://localhost:3000"]
+    cors_origins: Annotated[list[str], NoDecode]
 
     model_config = SettingsConfigDict(
         env_file=(".env", "../.env", "../../.env"),
@@ -49,6 +51,13 @@ class Settings(BaseSettings):
     @classmethod
     def parse_cors_origins(cls, value: str | list[str]) -> list[str]:
         if isinstance(value, str):
+            raw = value.strip()
+            if raw.startswith("["):
+                parsed = json.loads(raw)
+                if isinstance(parsed, list):
+                    return [
+                        str(origin).strip() for origin in parsed if str(origin).strip()
+                    ]
             return [origin.strip() for origin in value.split(",") if origin.strip()]
         return value
 

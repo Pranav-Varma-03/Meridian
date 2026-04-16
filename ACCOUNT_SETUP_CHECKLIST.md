@@ -26,9 +26,7 @@ I cannot create third-party accounts on your behalf, but this is everything you 
 
 ## 5) Auth0
 - Create tenant + API/application.
-- For this project, use:
-  - Tenant/domain: `dev-5id1h7gt1pxdc4mu.us.auth0.com`
-  - Client ID: `JVYswU8oUNT6pCaeuVUS0gveUsNHYK36`
+- Use your own Auth0 tenant/application values from your dashboard.
 - In **Auth0 Dashboard → Applications → Your App → Settings**, configure:
   - **Application Type**: `Regular Web Application`
   - **Token Endpoint Authentication Method**: `client_secret_post`
@@ -45,8 +43,8 @@ I cannot create third-party accounts on your behalf, but this is everything you 
 ### Auth0 verification checklist
 - Confirm root `.env` contains all required Auth0 vars (no `.env.local`):
   - `APP_BASE_URL=http://localhost:3000`
-  - `AUTH0_DOMAIN=dev-5id1h7gt1pxdc4mu.us.auth0.com`
-  - `AUTH0_CLIENT_ID=JVYswU8oUNT6pCaeuVUS0gveUsNHYK36`
+  - `AUTH0_DOMAIN=<your-auth0-tenant-domain>`
+  - `AUTH0_CLIENT_ID=<your-auth0-client-id>`
   - `AUTH0_CLIENT_SECRET=...`
   - `AUTH0_SECRET=...`
 - Run web app:

@@ -32,8 +32,8 @@ The web scripts also disable Next telemetry in dev/build/start to avoid network 
 
 Auth0 quick setup for local development (official `@auth0/nextjs-auth0` flow):
 
-- `AUTH0_DOMAIN=dev-5id1h7gt1pxdc4mu.us.auth0.com`
-- `AUTH0_CLIENT_ID=JVYswU8oUNT6pCaeuVUS0gveUsNHYK36`
+- `AUTH0_DOMAIN=<your-auth0-tenant-domain>`
+- `AUTH0_CLIENT_ID=<your-auth0-client-id>`
 - Configure in Auth0 dashboard:
   - Allowed Callback URLs: `http://localhost:3000/auth/callback`
   - Allowed Logout URLs: `http://localhost:3000`
@@ -44,11 +44,11 @@ Recommended `.env` Auth0 block:
 
 ```env
 APP_BASE_URL=http://localhost:3000
-AUTH0_DOMAIN=dev-5id1h7gt1pxdc4mu.us.auth0.com
-AUTH0_CLIENT_ID=JVYswU8oUNT6pCaeuVUS0gveUsNHYK36
+AUTH0_DOMAIN=<your-auth0-tenant-domain>
+AUTH0_CLIENT_ID=<your-auth0-client-id>
 AUTH0_CLIENT_SECRET=your-auth0-client-secret
 AUTH0_SECRET=<generate with: openssl rand -hex 32>
-AUTH0_AUDIENCE=https://api.meridian.app
+AUTH0_AUDIENCE=<your-auth0-api-identifier>
 ```
 
 Important for API connectivity/user provisioning:

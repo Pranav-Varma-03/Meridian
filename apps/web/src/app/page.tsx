@@ -27,7 +27,11 @@ export default async function Home() {
     );
   }
 
-  const apiBaseUrl = process.env.API_BASE_URL ?? "http://localhost:8000";
+  const apiBaseUrl = process.env.API_BASE_URL;
+
+  if (!apiBaseUrl) {
+    console.error("Missing required API_BASE_URL environment variable");
+  }
 
   try {
     // Use ID token from the authenticated web session for provisioning.
@@ -40,7 +44,7 @@ export default async function Home() {
       bearerToken = accessTokenResult?.token;
     }
 
-    if (bearerToken) {
+    if (bearerToken && apiBaseUrl) {
       const response = await fetch(`${apiBaseUrl}/api/v1/users/me`, {
         method: "POST",
         headers: {

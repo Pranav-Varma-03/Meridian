@@ -41,15 +41,15 @@ Copy the following environment variables into `.env.local`:
 
 ```bash
 APP_BASE_URL=http://localhost:3000
-AUTH0_DOMAIN=dev-5id1h7gt1pxdc4mu.us.auth0.com
-AUTH0_CLIENT_ID=JVYswU8oUNT6pCaeuVUS0gveUsNHYK36
-AUTH0_CLIENT_SECRET=*******MASKED*********
+AUTH0_DOMAIN=<your-auth0-tenant-domain>
+AUTH0_CLIENT_ID=<your-auth0-client-id>
+AUTH0_CLIENT_SECRET=<your-auth0-client-secret>
 
 # 64 character random string to encrypt the session cookie
 #
 # We're generating a secret for your convenience, but for production,
 # generate your own secret using `openssl rand -hex 32`
-AUTH0_SECRET=*******MASKED*********
+AUTH0_SECRET=<your-auth0-secret>
 ```
 
 ## Start the app
@@ -67,7 +67,7 @@ npm run dev -- --port 3000
 </sample_app_download_instructions>
 
 <current_auth0_configuration>
-I'm integrating the Auth0 Next.js SDK with client `JVYswU8oUNT6pCaeuVUS0gveUsNHYK36` on tenant `dev-5id1h7gt1pxdc4mu.us.auth0.com`.
+I'm integrating the Auth0 Next.js SDK with my Auth0 tenant and client.
 
 I haven't completed the Auth0 Application configuration yet, so the application won't work correctly (I will get callback mismatch on login, be unable to logout, be unable to check auth state).
 
@@ -85,15 +85,15 @@ Add the following variables to your `.env.local` file in the project root.
 
 ```bash
 APP_BASE_URL=http://localhost:3000
-AUTH0_DOMAIN=dev-5id1h7gt1pxdc4mu.us.auth0.com
-AUTH0_CLIENT_ID=JVYswU8oUNT6pCaeuVUS0gveUsNHYK36
-AUTH0_CLIENT_SECRET=*******MASKED*********
+AUTH0_DOMAIN=<your-auth0-tenant-domain>
+AUTH0_CLIENT_ID=<your-auth0-client-id>
+AUTH0_CLIENT_SECRET=<your-auth0-client-secret>
 
 # 64 character random string to encrypt the session cookie
 #
 # We're generating a secret for your convenience, but for production,
 # generate your own secret using `openssl rand -hex 32`
-AUTH0_SECRET=*******MASKED*********
+AUTH0_SECRET=<your-auth0-secret>
 ```
 
 ## Install the Auth0 Next.js SDK
