@@ -12,6 +12,7 @@ from app.models.entities import (
     IngestionJob,
     IngestionStatus,
 )
+from app.services import document_processor
 
 
 class DocumentNotFoundError(Exception):
@@ -64,7 +65,15 @@ async def create_uploaded_document(
         if collection_exists is None:
             raise CollectionNotFoundError("Collection not found")
 
+    document_id = uuid.uuid4()
+    storage_path = document_processor.save_uploaded_file(
+        document_id=document_id,
+        filename=filename,
+        file_bytes=file_bytes,
+    )
+
     document = Document(
+        id=document_id,
         user_id=user_id,
         collection_id=collection_id,
         filename=filename,
@@ -72,7 +81,9 @@ async def create_uploaded_document(
         file_size=len(file_bytes),
         mime_type=mime_type,
         status=IngestionStatus.queued,
-        metadata_json={},
+        metadata_json={
+            "storage_path": storage_path,
+        },
     )
     session.add(document)
     await session.flush()

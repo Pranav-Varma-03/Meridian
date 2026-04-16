@@ -226,10 +226,11 @@ async def process_next_ingestion_job(
         return False
 
     try:
-        await processor(claimed)
+        await processor(session, claimed)
         await mark_ingestion_job_ready(session, job_id=claimed.job.id)
         return True
     except RetryableIngestionError as exc:
+        await session.rollback()
         requeued = await mark_ingestion_job_retry_or_failed(
             session,
             job_id=claimed.job.id,
@@ -244,6 +245,7 @@ async def process_next_ingestion_job(
             )
         return True
     except NonRetryableIngestionError as exc:
+        await session.rollback()
         await mark_ingestion_job_failed(
             session,
             job_id=claimed.job.id,
@@ -251,6 +253,7 @@ async def process_next_ingestion_job(
         )
         return True
     except Exception:
+        await session.rollback()
         logger.exception(
             "Unexpected ingestion worker error",
             extra={"job_id": str(claimed.job.id)},

@@ -50,3 +50,6 @@ pnpm-debug.log*
 # Misc
 *.pem
 .vercel
+
+# Data
+data/

@@ -10,6 +10,10 @@ def _set_required_env(monkeypatch: pytest.MonkeyPatch) -> None:
         "postgresql+asyncpg://postgres.ref:password@aws-0-ap-south-1.pooler.supabase.com:6543/postgres?sslmode=require",
     )
     monkeypatch.setenv("REDIS_URL", "redis://localhost:6379")
+    monkeypatch.setenv("INGESTION_QUEUE_KEY", "ingestion:jobs")
+    monkeypatch.setenv("INGESTION_WORKER_DEQUEUE_TIMEOUT_SECONDS", "5")
+    monkeypatch.setenv("INGESTION_WORKER_MAX_ATTEMPTS", "3")
+    monkeypatch.setenv("INGESTION_WORKER_IDLE_SLEEP_SECONDS", "1.0")
     monkeypatch.setenv("OPENAI_API_KEY", "test-openai-key")
     monkeypatch.setenv("PINECONE_API_KEY", "test-pinecone-key")
     monkeypatch.setenv("AUTH0_DOMAIN", "example.auth0.com")
