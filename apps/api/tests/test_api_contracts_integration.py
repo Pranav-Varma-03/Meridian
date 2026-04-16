@@ -112,7 +112,7 @@ async def test_documents_upload_contract_accepts_txt(api_client: AsyncClient) ->
 
     async def _create_upload(_session, **_kwargs):
         return types.SimpleNamespace(
-            document=types.SimpleNamespace(filename="notes.txt"),
+            document=types.SimpleNamespace(id=uuid.uuid4(), filename="notes.txt"),
             job=types.SimpleNamespace(id=uuid.uuid4()),
         )
 
@@ -130,6 +130,8 @@ async def test_documents_upload_contract_accepts_txt(api_client: AsyncClient) ->
         body = response.json()
         assert body["status"] == "queued"
         assert body["job_id"]
+        assert body["document_id"]
+        assert body["deduplicated"] is False
     finally:
         monkeypatch.undo()
         app.dependency_overrides.clear()

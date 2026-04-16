@@ -3,6 +3,7 @@ import uuid
 from dataclasses import dataclass
 
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.entities import (
@@ -37,6 +38,8 @@ class DocumentWithCount:
 class UploadResult:
     document: Document
     job: IngestionJob
+    deduplicated: bool = False
+    enqueue_job: bool = True
 
 
 @dataclass(slots=True)
@@ -55,6 +58,78 @@ async def create_uploaded_document(
     file_bytes: bytes,
     collection_id: uuid.UUID | None,
 ) -> UploadResult:
+    file_hash = hashlib.sha256(file_bytes).hexdigest()
+
+    async def _existing_upload_result() -> UploadResult | None:
+        duplicate_filters = [
+            Document.user_id == user_id,
+            Document.file_hash == file_hash,
+        ]
+        if collection_id is None:
+            duplicate_filters.append(Document.collection_id.is_(None))
+        else:
+            duplicate_filters.append(Document.collection_id == collection_id)
+
+        existing_document = await session.scalar(
+            select(Document)
+            .where(*duplicate_filters)
+            .order_by(Document.created_at.desc())
+        )
+        if existing_document is None:
+            return None
+
+        active_job = await session.scalar(
+            select(IngestionJob)
+            .where(
+                IngestionJob.document_id == existing_document.id,
+                IngestionJob.status.in_(
+                    [
+                        IngestionStatus.queued,
+                        IngestionStatus.processing,
+                    ]
+                ),
+            )
+            .order_by(IngestionJob.created_at.desc())
+        )
+        if active_job is not None:
+            return UploadResult(
+                document=existing_document,
+                job=active_job,
+                deduplicated=True,
+                enqueue_job=False,
+            )
+
+        latest_job = await session.scalar(
+            select(IngestionJob)
+            .where(IngestionJob.document_id == existing_document.id)
+            .order_by(IngestionJob.created_at.desc())
+        )
+        if latest_job is not None:
+            return UploadResult(
+                document=existing_document,
+                job=latest_job,
+                deduplicated=True,
+                enqueue_job=False,
+            )
+
+        # Legacy/self-heal fallback for documents without any recorded ingestion job.
+        existing_document.status = IngestionStatus.queued
+        repair_job = IngestionJob(
+            document_id=existing_document.id,
+            status=IngestionStatus.queued,
+            attempts=0,
+        )
+        session.add(repair_job)
+        await session.commit()
+        await session.refresh(existing_document)
+        await session.refresh(repair_job)
+        return UploadResult(
+            document=existing_document,
+            job=repair_job,
+            deduplicated=True,
+            enqueue_job=True,
+        )
+
     if collection_id is not None:
         collection_exists = await session.scalar(
             select(Collection.id).where(
@@ -64,6 +139,10 @@ async def create_uploaded_document(
         )
         if collection_exists is None:
             raise CollectionNotFoundError("Collection not found")
+
+    existing_result = await _existing_upload_result()
+    if existing_result is not None:
+        return existing_result
 
     document_id = uuid.uuid4()
     storage_path = document_processor.save_uploaded_file(
@@ -77,7 +156,7 @@ async def create_uploaded_document(
         user_id=user_id,
         collection_id=collection_id,
         filename=filename,
-        file_hash=hashlib.sha256(file_bytes).hexdigest(),
+        file_hash=file_hash,
         file_size=len(file_bytes),
         mime_type=mime_type,
         status=IngestionStatus.queued,
@@ -95,11 +174,23 @@ async def create_uploaded_document(
     )
     session.add(job)
 
-    await session.commit()
+    try:
+        await session.commit()
+    except IntegrityError:
+        await session.rollback()
+        conflict_result = await _existing_upload_result()
+        if conflict_result is not None:
+            return conflict_result
+        raise
     await session.refresh(document)
     await session.refresh(job)
 
-    return UploadResult(document=document, job=job)
+    return UploadResult(
+        document=document,
+        job=job,
+        deduplicated=False,
+        enqueue_job=True,
+    )
 
 
 async def list_documents(

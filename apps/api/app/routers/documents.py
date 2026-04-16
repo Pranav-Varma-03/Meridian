@@ -2,7 +2,16 @@ import logging
 import uuid
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile
+from fastapi import (
+    APIRouter,
+    Depends,
+    File,
+    HTTPException,
+    Query,
+    Request,
+    Response,
+    UploadFile,
+)
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -73,16 +82,22 @@ class DocumentListResponse(BaseModel):
 
 class DocumentUploadAccepted(BaseModel):
     job_id: str
+    document_id: str
     filename: str | None
     status: str
+    deduplicated: bool = False
+    reused_existing_job: bool = False
     message: str
 
     model_config = ConfigDict(
         json_schema_extra={
             "example": {
                 "job_id": "5f578c6e-a922-4f07-8f13-eb5f62ce17bd",
+                "document_id": "9f4f8cce-b7b4-4a0a-b529-4f6f5906d5e4",
                 "filename": "handbook.pdf",
                 "status": "queued",
+                "deduplicated": False,
+                "reused_existing_job": False,
                 "message": "Document queued for processing",
             }
         }
@@ -108,6 +123,10 @@ class MessageResponse(BaseModel):
     summary="Upload document",
     description="Accepts a document upload and enqueues async ingestion.",
     responses={
+        200: {
+            "model": DocumentUploadAccepted,
+            "description": "Duplicate detected and existing ingestion result reused",
+        },
         401: UNAUTHORIZED_RESPONSE,
         404: NOT_FOUND_RESPONSE,
         413: PAYLOAD_TOO_LARGE_RESPONSE,
@@ -118,6 +137,7 @@ class MessageResponse(BaseModel):
 )
 async def upload_document(
     request: Request,
+    response: Response,
     file: UploadFile = File(...),
     collection_id: uuid.UUID | None = None,
     current_user: User = Depends(get_current_user),
@@ -150,36 +170,59 @@ async def upload_document(
     except document_service.CollectionNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
-    redis_client = getattr(request.app.state, "redis", None)
-    if redis_client is None:
-        logger.warning(
-            "Redis client unavailable; ingestion job not pushed to queue",
-            extra={
-                "job_id": str(result.job.id),
-                "document_id": str(getattr(result.document, "id", "unknown")),
-            },
-        )
-    else:
-        try:
-            await ingestion_worker_service.enqueue_ingestion_job(
-                redis_client,
-                queue_key=settings.ingestion_queue_key,
-                job_id=result.job.id,
-            )
-        except Exception:
-            logger.exception(
-                "Failed to enqueue ingestion job to Redis",
+    deduplicated = bool(getattr(result, "deduplicated", False))
+    enqueue_job = bool(getattr(result, "enqueue_job", True))
+    reused_existing_job = deduplicated and not enqueue_job
+    raw_job_status = getattr(getattr(result.job, "status", None), "value", None)
+    job_status = raw_job_status or "queued"
+
+    if enqueue_job:
+        redis_client = getattr(request.app.state, "redis", None)
+        if redis_client is None:
+            logger.warning(
+                "Redis client unavailable; ingestion job not pushed to queue",
                 extra={
                     "job_id": str(result.job.id),
                     "document_id": str(getattr(result.document, "id", "unknown")),
                 },
             )
+        else:
+            try:
+                await ingestion_worker_service.enqueue_ingestion_job(
+                    redis_client,
+                    queue_key=settings.ingestion_queue_key,
+                    job_id=result.job.id,
+                )
+            except Exception:
+                logger.exception(
+                    "Failed to enqueue ingestion job to Redis",
+                    extra={
+                        "job_id": str(result.job.id),
+                        "document_id": str(getattr(result.document, "id", "unknown")),
+                    },
+                )
+
+    if reused_existing_job:
+        if job_status in {"queued", "processing"}:
+            response.status_code = 202
+            message = (
+                "Duplicate document detected; existing active ingestion job returned"
+            )
+        else:
+            response.status_code = 200
+            message = "Duplicate document detected; returning existing ingestion result"
+    else:
+        response.status_code = 202
+        message = "Document queued for processing"
 
     return DocumentUploadAccepted(
         job_id=str(result.job.id),
+        document_id=str(result.document.id),
         filename=result.document.filename,
-        status="queued",
-        message="Document queued for processing",
+        status=job_status,
+        deduplicated=deduplicated,
+        reused_existing_job=reused_existing_job,
+        message=message,
     )
 
 

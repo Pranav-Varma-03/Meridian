@@ -78,8 +78,10 @@ async def test_upload_document_happy_path(
 
     async def _create(_session, **_kwargs):
         return types.SimpleNamespace(
-            document=types.SimpleNamespace(filename="notes.txt"),
+            document=types.SimpleNamespace(id=uuid.uuid4(), filename="notes.txt"),
             job=types.SimpleNamespace(id=uuid.uuid4()),
+            deduplicated=False,
+            enqueue_job=True,
         )
 
     async def _enqueue(_redis, *, queue_key: str, job_id: uuid.UUID):
@@ -95,8 +97,85 @@ async def test_upload_document_happy_path(
     body = response.json()
     assert body["status"] == "queued"
     assert body["filename"] == "notes.txt"
+    assert body["document_id"]
+    assert body["deduplicated"] is False
+    assert body["reused_existing_job"] is False
     assert body["job_id"]
     assert len(captured_enqueues) == 1
+
+
+@pytest.mark.asyncio
+async def test_upload_document_duplicate_returns_existing_result_without_enqueue(
+    api_client: AsyncClient,
+    override_auth_and_db,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured_enqueues: list[str] = []
+
+    async def _create(_session, **_kwargs):
+        return types.SimpleNamespace(
+            document=types.SimpleNamespace(id=uuid.uuid4(), filename="notes.txt"),
+            job=types.SimpleNamespace(
+                id=uuid.uuid4(),
+                status=types.SimpleNamespace(value="ready"),
+            ),
+            deduplicated=True,
+            enqueue_job=False,
+        )
+
+    async def _enqueue(_redis, *, queue_key: str, job_id: uuid.UUID):
+        captured_enqueues.append(f"{queue_key}:{job_id}")
+
+    monkeypatch.setattr(document_service, "create_uploaded_document", _create)
+    monkeypatch.setattr(ingestion_worker_service, "enqueue_ingestion_job", _enqueue)
+
+    files = {"file": ("notes.txt", b"hello world", "text/plain")}
+    response = await api_client.post("/api/v1/documents/upload", files=files)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "ready"
+    assert body["deduplicated"] is True
+    assert body["reused_existing_job"] is True
+    assert "Duplicate document detected" in body["message"]
+    assert captured_enqueues == []
+
+
+@pytest.mark.asyncio
+async def test_upload_document_duplicate_active_job_returns_202(
+    api_client: AsyncClient,
+    override_auth_and_db,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured_enqueues: list[str] = []
+
+    async def _create(_session, **_kwargs):
+        return types.SimpleNamespace(
+            document=types.SimpleNamespace(id=uuid.uuid4(), filename="notes.txt"),
+            job=types.SimpleNamespace(
+                id=uuid.uuid4(),
+                status=types.SimpleNamespace(value="processing"),
+            ),
+            deduplicated=True,
+            enqueue_job=False,
+        )
+
+    async def _enqueue(_redis, *, queue_key: str, job_id: uuid.UUID):
+        captured_enqueues.append(f"{queue_key}:{job_id}")
+
+    monkeypatch.setattr(document_service, "create_uploaded_document", _create)
+    monkeypatch.setattr(ingestion_worker_service, "enqueue_ingestion_job", _enqueue)
+
+    files = {"file": ("notes.txt", b"hello world", "text/plain")}
+    response = await api_client.post("/api/v1/documents/upload", files=files)
+
+    assert response.status_code == 202
+    body = response.json()
+    assert body["status"] == "processing"
+    assert body["deduplicated"] is True
+    assert body["reused_existing_job"] is True
+    assert "existing active ingestion job" in body["message"]
+    assert captured_enqueues == []
 
 
 @pytest.mark.asyncio

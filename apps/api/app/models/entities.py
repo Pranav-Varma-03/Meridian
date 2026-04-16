@@ -2,7 +2,17 @@ import enum
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, Enum, ForeignKey, Integer, String, Text, func
+from sqlalchemy import (
+    DateTime,
+    Enum,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+    func,
+    text,
+)
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -71,6 +81,23 @@ class Collection(Base):
 
 class Document(Base):
     __tablename__ = "documents"
+    __table_args__ = (
+        Index(
+            "uq_documents_user_file_hash_no_collection",
+            "user_id",
+            "file_hash",
+            unique=True,
+            postgresql_where=text("collection_id IS NULL"),
+        ),
+        Index(
+            "uq_documents_user_collection_file_hash",
+            "user_id",
+            "collection_id",
+            "file_hash",
+            unique=True,
+            postgresql_where=text("collection_id IS NOT NULL"),
+        ),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
