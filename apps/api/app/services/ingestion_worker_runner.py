@@ -2,11 +2,13 @@ import asyncio
 import logging
 
 import redis.asyncio as redis
+from openai import AsyncOpenAI
+from pinecone import Pinecone
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
 from app.core.database import AsyncSessionLocal
-from app.services import document_processor, ingestion_worker
+from app.services import document_processor, embeddings, ingestion_worker
 
 settings = get_settings()
 
@@ -15,6 +17,52 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s %(message)s",
 )
 logger = logging.getLogger(__name__)
+pinecone_client = Pinecone(api_key=settings.pinecone_api_key)
+openai_client = (
+    AsyncOpenAI(api_key=settings.openai_api_key) if settings.openai_api_key else None
+)
+
+
+async def _embed_chunks_with_retry(chunks, *, max_attempts: int = 3):
+    for attempt in range(1, max_attempts + 1):
+        try:
+            return await embeddings.embed_chunks(
+                provider=settings.embedding_provider,
+                chunks=chunks,
+                model=settings.embedding_model,
+                input_type=settings.embedding_input_type,
+                pinecone_client=pinecone_client,
+                openai_client=openai_client,
+            )
+        except Exception as exc:
+            if attempt >= max_attempts:
+                raise ingestion_worker.RetryableIngestionError(
+                    f"Embedding generation failed after retries: {exc}"
+                ) from exc
+            await asyncio.sleep(0.5 * attempt)
+
+
+async def _upsert_embeddings_with_retry(
+    *,
+    namespace: str,
+    embedded_chunks,
+    max_attempts: int = 3,
+) -> None:
+    for attempt in range(1, max_attempts + 1):
+        try:
+            embeddings.upsert_embeddings(
+                pinecone_client,
+                index_name=settings.pinecone_index_name,
+                namespace=namespace,
+                embedded_chunks=embedded_chunks,
+            )
+            return
+        except Exception as exc:
+            if attempt >= max_attempts:
+                raise ingestion_worker.RetryableIngestionError(
+                    f"Vector upsert failed after retries: {exc}"
+                ) from exc
+            await asyncio.sleep(0.5 * attempt)
 
 
 async def default_ingestion_processor(
@@ -58,6 +106,27 @@ async def default_ingestion_processor(
         document_id=claimed_job.document.id,
         chunks=chunks,
     )
+
+    persisted_chunks = await document_processor.list_document_chunks(
+        session,
+        document_id=claimed_job.document.id,
+    )
+
+    embedded_chunks = await _embed_chunks_with_retry(
+        persisted_chunks,
+    )
+
+    namespace = embeddings.build_pinecone_namespace(
+        user_id=claimed_job.document.user_id
+    )
+    await _upsert_embeddings_with_retry(
+        namespace=namespace,
+        embedded_chunks=embedded_chunks,
+    )
+
+    embedded_lookup = {item.chunk_id: item.vector_id for item in embedded_chunks}
+    for chunk_row in persisted_chunks:
+        chunk_row.vector_id = embedded_lookup.get(chunk_row.id)
 
     logger.info(
         "processing_ingestion_job",

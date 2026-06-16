@@ -1,88 +1,229 @@
 # Meridian
 
-Meridian is a monorepo for a production-ready RAG application.
-It has:
+Meridian is a monorepo for a production-oriented RAG application.
+
+It currently includes:
 
 - `apps/web` → Next.js frontend
 - `apps/api` → FastAPI backend
-- `packages/shared` → shared TypeScript types
+- `packages/shared` → shared TypeScript types/contracts
+
+## Current implemented state
+
+The repository is currently set up for:
+
+- Authenticated, user-scoped collections
+- Authenticated document upload/list/detail/delete APIs
+- Redis-backed ingestion job queue
+- Background ingestion worker
+- Document parsing + chunk persistence
+- Embedding generation through a provider-driven embedding layer
+- Pinecone vector upsert per user namespace
+- User-scoped document deduplication across collections
+
+Current ingestion flow:
+
+1. User uploads a supported file (`PDF`, `DOCX`, `TXT`)
+2. API creates the `documents` row and an `ingestion_jobs` row
+3. Job is pushed to Redis (`INGESTION_QUEUE_KEY`)
+4. Worker dequeues the job and parses/chunks the document
+5. Chunks are embed5. Chunks are embed5. Chunks are embed5. Chunks are. Vectors are upserted to Pinecone under namespace `user:<user_id>`
+7. `vector_id` is persisted on each chunk row
+8. Job/document move to `ready` on success, or `failed` on error
 
 ## Local setup
 
-1. Create environment file:
+### 1) Create environment file
 
 ```bash
 cp .env.example .env
 ```
 
-Fill `.env` with your credentials, especially:
+Fill `.env` with your credentials and runtime values.
 
-- `DATABASE_URL` → Supabase Postgres connection string (must include `sslmode=require`)
+### 2) Required environment values
+
+At minimum, configure:
+
+- `DATABASE_URL` → Supabase/Postgres connection string (must include `sslmode=require` when required by your provider)
 - `REDIS_URL`
-- `OPENAI_API_KEY`
 - `PINECONE_API_KEY`
-- Auth values (`AUTH0_DOMAIN`, `AUTH0_AUDIENCE`, `AUTH0_CLIENT_ID`)
+- `PINECONE_INDEX_NAME`
+- `EMBEDDING_PROVIDER`
+- `EMBEDDING_MODEL`
+- Auth values:
+  - `AUTH0_DOMAIN`
+  - `AUTH0_AUDIENCE`
+  - `AUTH0_CLIENT_ID`
+  - `AUTH0_CLIENT_SECRET`
+  - `AUTH0_SECRET`
 - `APP_BASE_URL`
-- `AUTH0_CLIENT_SECRET`
-- `AUTH0_SECRET`
-- `API_BASE_URL` (for web→api server-side calls, e.g. `http://localhost:8000`)
+- `API_BASE_URL` (for web → api server-side calls, e.g. `http://localhost:8000`)
 
-The web app reads Auth0 values from this same root `.env` file (no `.env.local` needed).
-The web scripts also disable Next telemetry in dev/build/start to avoid network timeout noise in restricted networks.
+`OPENAI_API_KEY` is optional and required only when `EMBEDDING_PROVIDER=openai`.
 
-Auth0 quick setup for local development (official `@auth0/nextjs-auth0` flow):
+The web app reads Auth0 values from the same root `.env` file.
+No `.env.local` is required for the current setup.
+
+### 3) Embedding configuration
+
+Embeddings are now provider-driven through environment variables.
+
+Example Pinecone embedding configuration:
+
+```env
+EMBEDDING_PROVIDER=pinecone
+EMBEDDING_MODEL=llama-text-embed-v2
+EMBEDDING_INPUT_TYPE=passage
+```
+
+Example OpenAI embedding configuration:
+
+```env
+EMBEDDING_PROVIDER=openai
+EMBEDDING_MODEL=text-embedding-3-small
+OPENAI_API_KEY=<your-openai-api-key>
+```
+
+Important note for Pinecone `llama-text-embed-v2`:
+
+- use `EMBEDDING_INPUT_TYPE=passage` for indexing/ingestion
+- use `query` later for retrieval-time query embeddings
+
+### 4) Auth0 quick setup for local development
+
+Use the official `@auth0/nextjs-auth0` flow.
 
 - `AUTH0_DOMAIN=<your-auth0-tenant-domain>`
 - `AUTH0_CLIENT_ID=<your-auth0-client-id>`
-- Configure in Auth0 dashboard:
-  - Allowed Callback URLs: `http://localhost:3000/auth/callback`
-  - Allowed Logout URLs: `http://localhost:3000`
-  - Application Type: `Regular Web Application`
-  - Token Endpoint Authentication Method: `client_secret_post`
 
-Recommended `.env` Auth0 block:
+Configure in the Auth0 dashboard:
+
+- Allowed Callback URLs: `http://localhost:3000/auth/callback`
+- Allowed Logout URLs: `http://localhost:3000`
+- Application Type: `Regular Web Application`
+- Token Endpoint Authentication Method: `client_secret_post`
+
+Recommended Auth0 block:
 
 ```env
 APP_BASE_URL=http://localhost:3000
 AUTH0_DOMAIN=<your-auth0-tenant-domain>
 AUTH0_CLIENT_ID=<your-auth0-client-id>
-AUTH0_CLIENT_SECRET=your-auth0-client-secret
+AUTH0_CLIENT_SECRET=<your-auth0-client-secret>
 AUTH0_SECRET=<generate with: openssl rand -hex 32>
 AUTH0_AUDIENCE=<your-auth0-api-identifier>
 ```
 
-Important for API connectivity/user provisioning:
+Important API token requirements:
 
-- In Auth0, create/configure an **API** with identifier matching `AUTH0_AUDIENCE`.
+- In Auth0, create/configure an API with identifier matching `AUTH0_AUDIENCE`
 - Access tokens used by the web app must have:
-  - `aud` = your `AUTH0_AUDIENCE`
-  - `iss` = `https://<AUTH0_DOMAIN>/`
+  - `aud = AUTH0_AUDIENCE`
+  - `iss = https://<AUTH0_DOMAIN>/`
 
 After login/signup, the web app calls `POST /api/v1/users/me` with the Auth0 access token.
-That endpoint verifies JWT and upserts the user into Postgres (`users` table).
+That endpoint verifies JWT and upserts the user into Postgres.
 
-2. Install dependencies:
+### 5) Install dependencies
 
 ```bash
 make setup
 ```
 
-3. Start the app:
+### 6) Run database migrations
+
+```bash
+make db-migrate
+```
+
+## Redis setup for local development
+
+Meridian uses Redis for the ingestion queue.
+
+### Option A: Local Redis
+
+Start Redis locally:
+
+```bash
+brew services start redis
+```
+
+Or run it directly:
+
+```bash
+redis-server --port 6379
+```
+
+Verify Redis is reachable:
+
+```bash
+redis-cli -h 127.0.0.1 -p 6379 ping
+```
+
+Expected response:
+
+```text
+PONG
+```
+
+If you are developing locally and your configured Upstash hostname does not resolve from your machine, override Redis explicitly when starting the API and worker:
+
+```bash
+REDIS_URL=redis://localhost:6379 make dev-api
+REDIS_URL=redis://localhost:6379 make dev-worker
+```
+
+### Option B: Upstash Redis
+
+Use your Upstash connection string in `.env`:
+
+```env
+REDIS_URL=rediss://<redis-username>:<redis-password>@<redis-host>:<redis-port>
+```
+
+If Upstash DNS/connectivity is unavailable locally, the API startup health checks and worker startup will fail until Redis is reachable.
+
+## Running the app locally
+
+### Start backend only
+
+```bash
+make dev-api
+```
+
+### Start frontend only
+
+```bash
+make dev-web
+```
+
+### Start frontend + backend together
 
 ```bash
 make dev
 ```
 
-To run ingestion worker separately (recommended in local dev):
+### Start ingestion worker
+
+Run the worker in a separate terminal during local ingestion testing:
 
 ```bash
 make dev-worker
 ```
 
-4. Run API migrations:
+Direct worker command:
 
 ```bash
-make db-migrate
+cd apps/api && .venv/bin/python -m app.services.ingestion_worker_runner
+```
+
+If you need to force local Redis:
+
+```bash
+cd /Users/pranav/Desktop/RAG/Meridian
+REDIS_URL=redis://localhost:6379 make dev-api
+REDIS_URL=redis://localhost:6379 make dev-worker
 ```
 
 Open:
@@ -90,9 +231,11 @@ Open:
 - Frontend: `http://localhost:3000`
 - API docs: `http://localhost:8000/docs`
 
-## Collections API (implemented)
+## Implemented APIs
 
-`/api/v1/collections` endpoints are now fully DB-backed and user-scoped:
+### Collections API
+
+`/api/v1/collections` endpoints are DB-backed and user-scoped:
 
 - `POST /api/v1/collections`
 - `GET /api/v1/collections`
@@ -102,14 +245,14 @@ Open:
 
 Notes:
 
-- All collection routes require Auth0 bearer token auth.
-- Collection names are enforced as unique per user (case-insensitive).
-- List/detail responses include `document_count`.
-- Delete returns `200` with `{ "message": "Collection deleted" }`.
+- All collection routes require Auth0 bearer-token auth
+- Collection names are unique per user (case-insensitive)
+- List/detail responses include `document_count`
+- Delete returns `200` with `{ "message": "Collection deleted" }`
 
-## Documents + Ingestion APIs (implemented)
+### Documents + Ingestion APIs
 
-`/api/v1/documents` now includes DB-backed, user-scoped metadata endpoints:
+`/api/v1/documents` includes DB-backed, user-scoped metadata endpoints:
 
 - `POST /api/v1/documents/upload`
 - `GET /api/v1/documents`
@@ -118,18 +261,44 @@ Notes:
 
 `/api/v1/ingest` lifecycle endpoints are also available:
 
-- `POST /api/v1/ingest` (queue ingestion for an existing document)
-- `GET /api/v1/ingest/{job_id}` (fetch ingestion job status)
+- `POST /api/v1/ingest` → queue ingestion for an existing document
+- `GET /api/v1/ingest/{job_id}` → fetch ingestion job status
 
 Notes:
 
-- Document upload creates both a `documents` record and an `ingestion_jobs` record in `queued` state.
-- Upload validations enforce supported MIME types (PDF/DOCX/TXT) and max size of 10MB.
-- `POST /api/v1/ingest` is idempotent for active jobs: if the latest job for a document is already `queued`/`processing`, the API returns that existing job instead of creating a duplicate.
-- Uploaded/manual-ingest jobs are pushed to Redis queue (`INGESTION_QUEUE_KEY`) and consumed by background worker.
-- All document and ingestion operations are authenticated and scoped to the current user.
+- Upload creates both a `documents` record and an `ingestion_jobs` record in `queued` state
+- Upload validations enforce supported MIME types (`PDF`, `DOCX`, `TXT`) and a max size of `10MB`
+- Uploaded/manual ingest jobs are pushed to Redis and consumed by the background worker
+- All document and ingestion operations are authenticated and scoped to the current user
+- Repeated manual ingest calls are idempotent while an active job already exists
 
-Auth endpoints provided by the SDK:
+### Current deduplication behavior
+
+Document deduplication is now **user-scoped**, not collection-scoped.
+
+That means:
+
+- collections behave like tags/organization buckets
+- identical file uploads for the same user deduplicate even if `collection_id` differs
+- the same bytes uploaded again by the same user reuse the existing document/job response instead of creating duplicate document content
+
+## Swagger/OpenAPI manual testing
+
+Swagger UI is the expected manual verification path for API work.
+
+Open:
+
+- `http://localhost:8000/docs`
+
+Relevant manual guides in this repo:
+
+- `ManualTestGuide/Documents_Ingestion_Swagger_Manual_Guide.md`
+- `ManualTestGuide/CollectionTesting_Manual_Guide.md`
+- `ManualTestGuide/MILESTONE1_MANUAL_TESTS.md`
+
+For documents/ingestion testing, make sure both API and worker are running before testing upload and queue flow.
+
+## Auth endpoints provided by the web SDK
 
 - `http://localhost:3000/auth/login`
 - `http://localhost:3000/auth/logout`
@@ -145,13 +314,15 @@ Quick Auth0 validation:
 
 ## Useful commands
 
+- `make setup` – full local project setup
 - `make dev` – run frontend and backend
 - `make dev-api` – run backend only
 - `make dev-web` – run frontend only
+- `make dev-worker` – run ingestion worker only
 - `make lint` – run lint checks
 - `make format` – format code
 - `make test` – run tests
-- `make db-migrate` – apply API migrations (Supabase/Postgres)
+- `make db-migrate` – apply API migrations
 - `make db-revision msg='name'` – create new migration
 
 ## Commit-time quality checks (auto-run on `git commit`)
@@ -175,7 +346,7 @@ pnpm run prepare
 
 If any check fails, commit is blocked until fixed.
 
-## Production DB Runbook
+## Production DB runbook
 
 Use Alembic migrations as the **only** schema change mechanism in production.
 Do not auto-create tables at API startup.

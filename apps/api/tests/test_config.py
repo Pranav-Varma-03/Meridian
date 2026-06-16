@@ -21,6 +21,9 @@ def _set_required_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("INGESTION_WORKER_MAX_ATTEMPTS", "3")
     monkeypatch.setenv("INGESTION_WORKER_IDLE_SLEEP_SECONDS", "1.0")
     monkeypatch.setenv("OPENAI_API_KEY", "test-openai-key")
+    monkeypatch.setenv("EMBEDDING_PROVIDER", "pinecone")
+    monkeypatch.setenv("EMBEDDING_MODEL", "llama-text-embed-v2")
+    monkeypatch.setenv("EMBEDDING_INPUT_TYPE", "passage")
     monkeypatch.setenv("PINECONE_API_KEY", "test-pinecone-key")
     monkeypatch.setenv("PINECONE_INDEX_NAME", "test-index")
     monkeypatch.setenv("AUTH0_DOMAIN", "example.auth0.com")
@@ -80,6 +83,7 @@ def test_settings_normalize_sslmode_for_asyncpg(
 
     assert settings.database_url.startswith("postgresql+asyncpg://")
     assert "ssl=require" in settings.database_url
+
     assert "sslmode=require" not in settings.database_url
 
 

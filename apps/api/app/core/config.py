@@ -3,7 +3,7 @@ from functools import lru_cache
 from typing import Annotated
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
-from pydantic import field_validator
+from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
@@ -26,7 +26,12 @@ class Settings(BaseSettings):
     ingestion_worker_idle_sleep_seconds: float
 
     # OpenAI
-    openai_api_key: str
+    openai_api_key: str | None = None
+
+    # Embeddings (provider-agnostic)
+    embedding_provider: str
+    embedding_model: str
+    embedding_input_type: str | None = None
 
     # Pinecone
     pinecone_api_key: str
@@ -143,6 +148,54 @@ class Settings(BaseSettings):
                 f"LOG_LEVEL must be one of: {', '.join(sorted(supported))}"
             )
         return upper
+
+    @field_validator("embedding_provider")
+    @classmethod
+    def validate_embedding_provider(cls, value: str) -> str:
+        normalized = value.strip().lower()
+        supported = {"pinecone", "openai"}
+        if normalized not in supported:
+            raise ValueError(
+                f"EMBEDDING_PROVIDER must be one of: {', '.join(sorted(supported))}"
+            )
+        return normalized
+
+    @field_validator("embedding_model")
+    @classmethod
+    def validate_embedding_model(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("EMBEDDING_MODEL must be a non-empty string")
+        return normalized
+
+    @field_validator("embedding_input_type")
+    @classmethod
+    def validate_embedding_input_type(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+
+        normalized = value.strip().lower()
+        if not normalized:
+            return None
+
+        supported = {"passage", "query"}
+        if normalized not in supported:
+            raise ValueError(
+                f"EMBEDDING_INPUT_TYPE must be one of: {', '.join(sorted(supported))}"
+            )
+        return normalized
+
+    @model_validator(mode="after")
+    def validate_embedding_configuration(self) -> "Settings":
+        if (
+            self.embedding_provider == "pinecone"
+            and self.embedding_model == "llama-text-embed-v2"
+            and not self.embedding_input_type
+        ):
+            raise ValueError(
+                "EMBEDDING_INPUT_TYPE is required for pinecone model llama-text-embed-v2"
+            )
+        return self
 
 
 @lru_cache

@@ -24,6 +24,9 @@ os.environ.setdefault("INGESTION_WORKER_DEQUEUE_TIMEOUT_SECONDS", "5")
 os.environ.setdefault("INGESTION_WORKER_MAX_ATTEMPTS", "3")
 os.environ.setdefault("INGESTION_WORKER_IDLE_SLEEP_SECONDS", "1.0")
 os.environ.setdefault("OPENAI_API_KEY", "test-openai-key")
+os.environ.setdefault("EMBEDDING_PROVIDER", "pinecone")
+os.environ.setdefault("EMBEDDING_MODEL", "llama-text-embed-v2")
+os.environ.setdefault("EMBEDDING_INPUT_TYPE", "passage")
 os.environ.setdefault("PINECONE_API_KEY", "test-pinecone-key")
 os.environ.setdefault("PINECONE_INDEX_NAME", "test-index")
 os.environ.setdefault("AUTH0_DOMAIN", "example.auth0.com")
@@ -222,6 +225,42 @@ async def test_upload_document_duplicate_across_collection_scope_reuses_existing
     assert body["deduplicated"] is True
     assert body["reused_existing_job"] is True
     assert captured_enqueues == []
+
+
+@pytest.mark.asyncio
+async def test_upload_document_failed_previous_ingestion_creates_fresh_job(
+    api_client: AsyncClient,
+    override_auth_and_db,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured_enqueues: list[str] = []
+
+    async def _create(_session, **_kwargs):
+        return types.SimpleNamespace(
+            document=types.SimpleNamespace(id=uuid.uuid4(), filename="notes.txt"),
+            job=types.SimpleNamespace(
+                id=uuid.uuid4(),
+                status=types.SimpleNamespace(value="queued"),
+            ),
+            deduplicated=False,
+            enqueue_job=True,
+        )
+
+    async def _enqueue(_redis, *, queue_key: str, job_id: uuid.UUID):
+        captured_enqueues.append(f"{queue_key}:{job_id}")
+
+    monkeypatch.setattr(document_service, "create_uploaded_document", _create)
+    monkeypatch.setattr(ingestion_worker_service, "enqueue_ingestion_job", _enqueue)
+
+    files = {"file": ("notes.txt", b"hello world", "text/plain")}
+    response = await api_client.post("/api/v1/documents/upload", files=files)
+
+    assert response.status_code == 202
+    body = response.json()
+    assert body["status"] == "queued"
+    assert body["deduplicated"] is False
+    assert body["reused_existing_job"] is False
+    assert len(captured_enqueues) == 1
 
 
 @pytest.mark.asyncio

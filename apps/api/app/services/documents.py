@@ -1,6 +1,7 @@
 import hashlib
 import uuid
 from dataclasses import dataclass
+from pathlib import Path
 
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
@@ -60,6 +61,17 @@ async def create_uploaded_document(
 ) -> UploadResult:
     file_hash = hashlib.sha256(file_bytes).hexdigest()
 
+    async def _delete_failed_duplicate(document: Document) -> None:
+        metadata = document.metadata_json or {}
+        storage_path = metadata.get("storage_path")
+        if isinstance(storage_path, str) and storage_path:
+            path = Path(storage_path)
+            if path.exists() and path.is_file():
+                path.unlink()
+
+        await session.delete(document)
+        await session.flush()
+
     async def _existing_upload_result() -> UploadResult | None:
         existing_document = await session.scalar(
             select(Document).where(
@@ -96,6 +108,10 @@ async def create_uploaded_document(
             .where(IngestionJob.document_id == existing_document.id)
             .order_by(IngestionJob.created_at.desc())
         )
+        if latest_job is not None and latest_job.status == IngestionStatus.failed:
+            await _delete_failed_duplicate(existing_document)
+            return None
+
         if latest_job is not None:
             return UploadResult(
                 document=existing_document,

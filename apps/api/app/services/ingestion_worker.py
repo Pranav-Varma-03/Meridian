@@ -225,15 +225,17 @@ async def process_next_ingestion_job(
     if claimed is None:
         return False
 
+    claimed_job_id = claimed.job.id
+
     try:
         await processor(session, claimed)
-        await mark_ingestion_job_ready(session, job_id=claimed.job.id)
+        await mark_ingestion_job_ready(session, job_id=claimed_job_id)
         return True
     except RetryableIngestionError as exc:
         await session.rollback()
         requeued = await mark_ingestion_job_retry_or_failed(
             session,
-            job_id=claimed.job.id,
+            job_id=claimed_job_id,
             error_message=str(exc),
             max_attempts=max_attempts,
         )
@@ -241,14 +243,14 @@ async def process_next_ingestion_job(
             await enqueue_ingestion_job(
                 redis_client,
                 queue_key=queue_key,
-                job_id=claimed.job.id,
+                job_id=claimed_job_id,
             )
         return True
     except NonRetryableIngestionError as exc:
         await session.rollback()
         await mark_ingestion_job_failed(
             session,
-            job_id=claimed.job.id,
+            job_id=claimed_job_id,
             error_message=str(exc),
         )
         return True
@@ -256,11 +258,11 @@ async def process_next_ingestion_job(
         await session.rollback()
         logger.exception(
             "Unexpected ingestion worker error",
-            extra={"job_id": str(claimed.job.id)},
+            extra={"job_id": str(claimed_job_id)},
         )
         requeued = await mark_ingestion_job_retry_or_failed(
             session,
-            job_id=claimed.job.id,
+            job_id=claimed_job_id,
             error_message="Unexpected ingestion processing error",
             max_attempts=max_attempts,
         )
@@ -268,6 +270,6 @@ async def process_next_ingestion_job(
             await enqueue_ingestion_job(
                 redis_client,
                 queue_key=queue_key,
-                job_id=claimed.job.id,
+                job_id=claimed_job_id,
             )
         return True

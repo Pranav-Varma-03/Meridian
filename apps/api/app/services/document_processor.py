@@ -7,7 +7,7 @@ from xml.etree import ElementTree
 from zipfile import ZipFile
 
 from pypdf import PdfReader
-from sqlalchemy import delete
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.entities import DocumentChunk
@@ -186,3 +186,16 @@ async def replace_document_chunks(
             )
         )
     return len(chunks)
+
+
+async def list_document_chunks(
+    session: AsyncSession,
+    *,
+    document_id: uuid.UUID,
+) -> list[DocumentChunk]:
+    result = await session.execute(
+        select(DocumentChunk)
+        .where(DocumentChunk.document_id == document_id)
+        .order_by(DocumentChunk.chunk_index.asc())
+    )
+    return list(result.scalars().all())
