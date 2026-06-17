@@ -8,7 +8,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
 from app.core.database import AsyncSessionLocal
-from app.services import document_processor, embeddings, ingestion_worker
+from app.services import (
+    contextual_chunking,
+    document_processor,
+    embeddings,
+    ingestion_worker,
+)
 
 settings = get_settings()
 
@@ -101,6 +106,38 @@ async def default_ingestion_processor(
             "Chunk generation produced no output"
         )
 
+    document_text = "\n\n".join(
+        segment.text for segment in segments if segment.text.strip()
+    )
+    contextualized_lookup: dict[int, str] = {}
+
+    if settings.contextual_embedding_enabled and document_text:
+        if settings.contextual_chunking_provider == "openai":
+            if openai_client is None or not settings.contextual_chunking_model:
+                raise ingestion_worker.NonRetryableIngestionError(
+                    "OpenAI contextual chunking is enabled but not configured correctly"
+                )
+
+            for chunk in chunks:
+                contextualized_lookup[
+                    chunk.chunk_index
+                ] = await contextual_chunking.situate_chunk_with_openai(
+                    openai_client,
+                    document_text=document_text,
+                    chunk_text=chunk.chunk_text,
+                    model=settings.contextual_chunking_model,
+                )
+        else:
+            contextualized_chunks = document_processor.build_contextualized_chunks(
+                segments=segments,
+                source_file=claimed_job.document.filename,
+            )
+            contextualized_lookup = {
+                chunk.chunk_index: chunk.contextualized_text
+                for chunk in contextualized_chunks
+                if chunk.contextualized_text
+            }
+
     await document_processor.replace_document_chunks(
         session,
         document_id=claimed_job.document.id,
@@ -112,8 +149,18 @@ async def default_ingestion_processor(
         document_id=claimed_job.document.id,
     )
 
+    chunks_for_embedding = []
+    if settings.contextual_embedding_enabled:
+        for persisted_chunk in persisted_chunks:
+            contextualized_text = contextualized_lookup.get(persisted_chunk.chunk_index)
+            if contextualized_text:
+                persisted_chunk.chunk_text = contextualized_text
+            chunks_for_embedding.append(persisted_chunk)
+    else:
+        chunks_for_embedding = persisted_chunks
+
     embedded_chunks = await _embed_chunks_with_retry(
-        persisted_chunks,
+        chunks_for_embedding,
     )
 
     namespace = embeddings.build_pinecone_namespace(

@@ -24,6 +24,8 @@ def _set_required_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("EMBEDDING_PROVIDER", "pinecone")
     monkeypatch.setenv("EMBEDDING_MODEL", "llama-text-embed-v2")
     monkeypatch.setenv("EMBEDDING_INPUT_TYPE", "passage")
+    monkeypatch.setenv("CONTEXTUAL_EMBEDDING_ENABLED", "false")
+    monkeypatch.setenv("CONTEXTUAL_CHUNKING_PROVIDER", "native")
     monkeypatch.setenv("PINECONE_API_KEY", "test-pinecone-key")
     monkeypatch.setenv("PINECONE_INDEX_NAME", "test-index")
     monkeypatch.setenv("AUTH0_DOMAIN", "example.auth0.com")

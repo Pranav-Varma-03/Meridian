@@ -28,6 +28,7 @@ class ChunkPayload:
     chunk_text: str
     token_count: int
     metadata: dict
+    contextualized_text: str | None = None
 
 
 def _default_storage_root() -> Path:
@@ -162,6 +163,70 @@ def build_chunks(
             )
             chunk_index += 1
     return payloads
+
+
+def build_contextualized_chunks(
+    *,
+    segments: list[TextSegment],
+    source_file: str,
+    chunk_size: int = DEFAULT_CHUNK_SIZE,
+    chunk_overlap: int = DEFAULT_CHUNK_OVERLAP,
+) -> list[ChunkPayload]:
+    payloads = build_chunks(
+        segments=segments,
+        source_file=source_file,
+        chunk_size=chunk_size,
+        chunk_overlap=chunk_overlap,
+    )
+
+    document_text = "\n\n".join(
+        segment.text for segment in segments if segment.text.strip()
+    )
+    if not document_text:
+        return payloads
+
+    for payload in payloads:
+        payload.contextualized_text = _situate_chunk_with_document_context(
+            document_text=document_text,
+            chunk_text=payload.chunk_text,
+        )
+
+    return payloads
+
+
+def _situate_chunk_with_document_context(*, document_text: str, chunk_text: str) -> str:
+    normalized_document = re.sub(r"\s+", " ", document_text).strip()
+    normalized_chunk = re.sub(r"\s+", " ", chunk_text).strip()
+
+    if not normalized_document or not normalized_chunk:
+        return chunk_text
+
+    chunk_position = normalized_document.find(normalized_chunk)
+    if chunk_position < 0:
+        preview = normalized_document[:240].strip()
+        if not preview:
+            return chunk_text
+        return f"Document summary context: {preview}\n\nChunk: {chunk_text}"
+
+    lead_start = max(0, chunk_position - 240)
+    trail_end = min(
+        len(normalized_document), chunk_position + len(normalized_chunk) + 240
+    )
+    leading_context = normalized_document[lead_start:chunk_position].strip()
+    trailing_context = normalized_document[
+        chunk_position + len(normalized_chunk) : trail_end
+    ].strip()
+
+    context_parts: list[str] = []
+    if leading_context:
+        context_parts.append(f"Leading context: {leading_context}")
+    if trailing_context:
+        context_parts.append(f"Trailing context: {trailing_context}")
+
+    if not context_parts:
+        return chunk_text
+
+    return "\n".join(context_parts + [f"Chunk: {chunk_text}"])
 
 
 async def replace_document_chunks(

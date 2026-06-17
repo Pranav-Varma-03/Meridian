@@ -32,6 +32,9 @@ class Settings(BaseSettings):
     embedding_provider: str
     embedding_model: str
     embedding_input_type: str | None = None
+    contextual_embedding_enabled: bool = False
+    contextual_chunking_provider: str = "native"
+    contextual_chunking_model: str | None = None
 
     # Pinecone
     pinecone_api_key: str
@@ -185,6 +188,17 @@ class Settings(BaseSettings):
             )
         return normalized
 
+    @field_validator("contextual_chunking_provider")
+    @classmethod
+    def validate_contextual_chunking_provider(cls, value: str) -> str:
+        normalized = value.strip().lower()
+        supported = {"native", "openai"}
+        if normalized not in supported:
+            raise ValueError(
+                "CONTEXTUAL_CHUNKING_PROVIDER must be one of: native, openai"
+            )
+        return normalized
+
     @model_validator(mode="after")
     def validate_embedding_configuration(self) -> "Settings":
         if (
@@ -194,6 +208,15 @@ class Settings(BaseSettings):
         ):
             raise ValueError(
                 "EMBEDDING_INPUT_TYPE is required for pinecone model llama-text-embed-v2"
+            )
+
+        if (
+            self.contextual_embedding_enabled
+            and self.contextual_chunking_provider == "openai"
+            and (not self.contextual_chunking_model or not self.openai_api_key)
+        ):
+            raise ValueError(
+                "OpenAI contextual chunking requires CONTEXTUAL_CHUNKING_MODEL and OPENAI_API_KEY"
             )
         return self
 

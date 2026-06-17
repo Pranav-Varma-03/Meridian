@@ -87,6 +87,32 @@ def test_build_chunks_includes_required_metadata() -> None:
     assert "ingested_at" in first.metadata
 
 
+def test_build_contextualized_chunks_adds_contextualized_text() -> None:
+    segments = [
+        document_processor.TextSegment(
+            page_number=1,
+            text=(
+                "Introduction section explains the overall topic. "
+                "Detailed chunk content lives in the middle. "
+                "Closing section summarizes the document."
+            ),
+        )
+    ]
+
+    chunks = document_processor.build_contextualized_chunks(
+        segments=segments,
+        source_file="notes.txt",
+        chunk_size=40,
+        chunk_overlap=10,
+    )
+
+    assert len(chunks) >= 1
+    assert any(chunk.contextualized_text for chunk in chunks)
+    assert all(
+        "Chunk:" in (chunk.contextualized_text or chunk.chunk_text) for chunk in chunks
+    )
+
+
 @pytest.mark.asyncio
 async def test_replace_document_chunks_deletes_and_adds() -> None:
     class DummySession:
