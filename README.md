@@ -16,7 +16,7 @@ The repository is currently set up for:
 - Authenticated document upload/list/detail/delete APIs
 - Redis-backed ingestion job queue
 - Background ingestion worker
-- Document parsing + chunk persistence
+- Document parsing + semantic chunk persistence
 - Embedding generation through a provider-driven embedding layer
 - Pinecone vector upsert per user namespace
 - User-scoped document deduplication across collections
@@ -27,9 +27,11 @@ Current ingestion flow:
 2. API creates the `documents` row and an `ingestion_jobs` row
 3. Job is pushed to Redis (`INGESTION_QUEUE_KEY`)
 4. Worker dequeues the job and parses/chunks the document
-5. Chunks are embed5. Chunks are embed5. Chunks are embed5. Chunks are. Vectors are upserted to Pinecone under namespace `user:<user_id>`
-7. `vector_id` is persisted on each chunk row
-8. Job/document move to `ready` on success, or `failed` on error
+5. Chunks are semantically split using paragraph/sentence/clause-aware chunking with overlap
+6. Optional contextual chunk enrichment can be applied before embedding
+7. Vectors are upserted to Pinecone under namespace `user:<user_id>`
+8. `vector_id` is persisted on each chunk row
+9. Job/document move to `ready` on success, or `failed` on error
 
 ## Local setup
 
@@ -89,6 +91,36 @@ Important note for Pinecone `llama-text-embed-v2`:
 
 - use `EMBEDDING_INPUT_TYPE=passage` for indexing/ingestion
 - use `query` later for retrieval-time query embeddings
+
+### 3.1) Contextual chunking options
+
+The ingestion pipeline now supports three chunking/enrichment modes:
+
+1. **Base semantic chunking**
+   - paragraph / sentence / clause aware splitting
+   - overlap preserved between merged semantic units
+
+2. **Native contextual chunking**
+   - enable with:
+
+   ```env
+   CONTEXTUAL_EMBEDDING_ENABLED=true
+   CONTEXTUAL_CHUNKING_PROVIDER=native
+   ```
+
+   This uses document-local leading/trailing context to enrich chunk text before embedding.
+
+3. **LLM contextual chunking**
+   - enable with:
+
+   ```env
+   CONTEXTUAL_EMBEDDING_ENABLED=true
+   CONTEXTUAL_CHUNKING_PROVIDER=openai
+   CONTEXTUAL_CHUNKING_MODEL=gpt-4o-mini
+   OPENAI_API_KEY=<your-openai-api-key>
+   ```
+
+   This asks an LLM to generate a short retrieval-oriented context for each chunk before embedding.
 
 ### 4) Auth0 quick setup for local development
 

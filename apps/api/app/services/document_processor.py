@@ -130,6 +130,102 @@ def _split_with_overlap(text: str, chunk_size: int, overlap: int) -> list[str]:
     return chunks
 
 
+def _split_paragraphs(text: str) -> list[str]:
+    return [part.strip() for part in re.split(r"\n\s*\n+", text) if part.strip()]
+
+
+def _split_sentences(text: str) -> list[str]:
+    return [part.strip() for part in re.split(r"(?<=[.!?])\s+", text) if part.strip()]
+
+
+def _split_clauses(text: str) -> list[str]:
+    return [part.strip() for part in re.split(r"(?<=[,;:])\s+", text) if part.strip()]
+
+
+def _split_words(text: str) -> list[str]:
+    return [part.strip() for part in text.split() if part.strip()]
+
+
+def _merge_semantic_units(
+    units: list[str],
+    *,
+    chunk_size: int,
+    overlap: int,
+    joiner: str,
+) -> list[str]:
+    chunks: list[str] = []
+    current: list[str] = []
+
+    def _joined_length(parts: list[str]) -> int:
+        return len(joiner.join(parts)) if parts else 0
+
+    for unit in units:
+        if not current:
+            current = [unit]
+            continue
+
+        candidate = joiner.join([*current, unit])
+        if len(candidate) <= chunk_size:
+            current.append(unit)
+            continue
+
+        chunks.append(joiner.join(current).strip())
+
+        overlap_units: list[str] = []
+        overlap_length = 0
+        for previous_unit in reversed(current):
+            unit_length = len(previous_unit) + (len(joiner) if overlap_units else 0)
+            if overlap_units and overlap_length + unit_length > overlap:
+                break
+            overlap_units.insert(0, previous_unit)
+            overlap_length += unit_length
+            if overlap_length >= overlap:
+                break
+
+        current = [*overlap_units, unit] if overlap_units else [unit]
+
+    if current:
+        chunks.append(joiner.join(current).strip())
+
+    return [chunk for chunk in chunks if chunk]
+
+
+def _semantic_split(text: str, chunk_size: int, overlap: int) -> list[str]:
+    normalized = text.strip()
+    if not normalized:
+        return []
+    if len(normalized) <= chunk_size:
+        return [normalized]
+
+    split_strategies: list[tuple[callable, str]] = [
+        (_split_paragraphs, "\n\n"),
+        (_split_sentences, " "),
+        (_split_clauses, " "),
+        (_split_words, " "),
+    ]
+
+    for splitter, joiner in split_strategies:
+        units = splitter(normalized)
+        if len(units) <= 1:
+            continue
+
+        expanded_units: list[str] = []
+        for unit in units:
+            if len(unit) <= chunk_size:
+                expanded_units.append(unit)
+            else:
+                expanded_units.extend(_semantic_split(unit, chunk_size, overlap))
+
+        return _merge_semantic_units(
+            expanded_units,
+            chunk_size=chunk_size,
+            overlap=overlap,
+            joiner=joiner,
+        )
+
+    return _split_with_overlap(normalized, chunk_size, overlap)
+
+
 def build_chunks(
     *,
     segments: list[TextSegment],
@@ -140,7 +236,7 @@ def build_chunks(
     payloads: list[ChunkPayload] = []
     chunk_index = 0
     for segment in segments:
-        segment_chunks = _split_with_overlap(
+        segment_chunks = _semantic_split(
             segment.text,
             chunk_size=chunk_size,
             overlap=chunk_overlap,

@@ -103,3 +103,15 @@ def test_settings_normalize_channel_binding_for_asyncpg(
     assert settings.database_url.startswith("postgresql+asyncpg://")
     assert "channel_binding=require" not in settings.database_url
     assert "ssl=require" in settings.database_url
+
+
+def test_settings_require_openai_contextual_config_when_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_required_env(monkeypatch)
+    monkeypatch.setenv("CONTEXTUAL_EMBEDDING_ENABLED", "true")
+    monkeypatch.setenv("CONTEXTUAL_CHUNKING_PROVIDER", "openai")
+    monkeypatch.delenv("CONTEXTUAL_CHUNKING_MODEL", raising=False)
+
+    with pytest.raises(ValidationError):
+        Settings()
