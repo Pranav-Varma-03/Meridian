@@ -1,3 +1,4 @@
+import asyncio
 import uuid
 from dataclasses import dataclass
 
@@ -13,6 +14,14 @@ class EmbeddedChunk:
     vector_id: str
     values: list[float]
     metadata: dict
+
+
+class VectorDeletionError(Exception):
+    """Raised when Pinecone vector cleanup cannot complete safely."""
+
+    def __init__(self, *, retryable: bool) -> None:
+        super().__init__("Vector cleanup failed")
+        self.retryable = retryable
 
 
 def _normalize_metadata(metadata: dict | None) -> dict[str, str | int | float | bool]:
@@ -126,3 +135,50 @@ def upsert_embeddings(
         for item in embedded_chunks
     ]
     index.upsert(vectors=vectors, namespace=namespace)
+
+
+def _is_retryable_vector_error(exc: Exception) -> bool:
+    status = getattr(exc, "status", None) or getattr(exc, "status_code", None)
+    if isinstance(status, int):
+        return status == 429 or status >= 500
+
+    return isinstance(exc, (ConnectionError, TimeoutError)) or any(
+        marker in exc.__class__.__name__.lower()
+        for marker in ("timeout", "connection", "unavailable", "temporar")
+    )
+
+
+async def delete_embeddings(
+    pinecone_client: Pinecone,
+    *,
+    index_name: str,
+    namespace: str,
+    vector_ids: list[str],
+    batch_size: int,
+    timeout_seconds: float,
+    max_attempts: int,
+) -> None:
+    """Delete exact vector IDs from one namespace with bounded retries.
+
+    Deleting an ID that is already absent is a successful, idempotent operation in
+    Pinecone. This function intentionally accepts only a server-derived namespace.
+    """
+    unique_vector_ids = list(dict.fromkeys(vector_ids))
+    if not unique_vector_ids:
+        return
+
+    index = pinecone_client.Index(index_name)
+    for start in range(0, len(unique_vector_ids), batch_size):
+        batch = unique_vector_ids[start : start + batch_size]
+        for attempt in range(1, max_attempts + 1):
+            try:
+                await asyncio.wait_for(
+                    asyncio.to_thread(index.delete, ids=batch, namespace=namespace),
+                    timeout=timeout_seconds,
+                )
+                break
+            except Exception as exc:
+                retryable = _is_retryable_vector_error(exc)
+                if not retryable or attempt == max_attempts:
+                    raise VectorDeletionError(retryable=retryable) from exc
+                await asyncio.sleep(0.1 * attempt)

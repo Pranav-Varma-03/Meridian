@@ -23,6 +23,7 @@ from app.schemas import (
     INTERNAL_ERROR_RESPONSE,
     NOT_FOUND_RESPONSE,
     PAYLOAD_TOO_LARGE_RESPONSE,
+    SERVICE_UNAVAILABLE_RESPONSE,
     UNAUTHORIZED_RESPONSE,
     UNSUPPORTED_MEDIA_RESPONSE,
     VALIDATION_ERROR_RESPONSE,
@@ -327,30 +328,45 @@ async def get_document(
     response_model=MessageResponse,
     status_code=200,
     summary="Delete document",
-    description="Deletes document data and returns a success message.",
+    description=(
+        "Deletes document data and its owner-scoped Pinecone vectors before "
+        "returning a success message."
+    ),
     responses={
         401: UNAUTHORIZED_RESPONSE,
         404: NOT_FOUND_RESPONSE,
         422: VALIDATION_ERROR_RESPONSE,
+        503: SERVICE_UNAVAILABLE_RESPONSE,
         500: INTERNAL_ERROR_RESPONSE,
     },
 )
 async def delete_document(
     document_id: uuid.UUID,
+    request: Request,
     current_user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_db_session),
 ):
     """
-    Delete a document and all associated chunks/embeddings.
-    Also removes from vector store and file storage.
+    Delete a document and all associated chunks and vectors.
+
+    The document remains available when Pinecone cleanup fails so the request can
+    be retried without returning stale vectors after a successful deletion.
     """
     try:
         await document_service.delete_document(
             session,
             user_id=current_user.id,
             document_id=document_id,
+            pinecone_client=request.app.state.pinecone,
+            pinecone_index_name=settings.pinecone_index_name,
+            vector_delete_batch_size=settings.pinecone_vector_delete_batch_size,
+            vector_delete_timeout_seconds=settings.pinecone_vector_delete_timeout_seconds,
+            vector_delete_max_attempts=settings.pinecone_vector_delete_max_attempts,
+            request_id=getattr(request.state, "request_id", "unknown"),
         )
     except document_service.DocumentNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except document_service.VectorCleanupUnavailableError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
     return MessageResponse(message="Document deleted successfully")

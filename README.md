@@ -55,7 +55,8 @@ At minimum, configure:
 - `EMBEDDING_MODEL`
 - Auth values:
   - `AUTH0_DOMAIN`
-  - `AUTH0_AUDIENCE`
+- `AUTH0_AUDIENCE`
+- `AUTH0_SCOPE` (normally `openid profile email`)
   - `AUTH0_CLIENT_ID`
   - `AUTH0_CLIENT_SECRET`
   - `AUTH0_SECRET`
@@ -145,17 +146,30 @@ AUTH0_CLIENT_ID=<your-auth0-client-id>
 AUTH0_CLIENT_SECRET=<your-auth0-client-secret>
 AUTH0_SECRET=<generate with: openssl rand -hex 32>
 AUTH0_AUDIENCE=<your-auth0-api-identifier>
+AUTH0_SCOPE=openid profile email
 ```
 
 Important API token requirements:
 
 - In Auth0, create/configure an API with identifier matching `AUTH0_AUDIENCE`
+- Enable RBAC and **Add Permissions in the Access Token** for that API.
+- Add the `documents:reingest` API permission to the operator/admin role that may request document re-ingestion.
 - Access tokens used by the web app must have:
   - `aud = AUTH0_AUDIENCE`
   - `iss = https://<AUTH0_DOMAIN>/`
+- The Next.js Auth0 v4 client explicitly requests this audience. Log out and log
+  back in after changing it so the session receives a fresh access token.
 
 After login/signup, the web app calls `POST /api/v1/users/me` with the Auth0 access token.
 That endpoint verifies JWT and upserts the user into Postgres.
+
+### Development token-claims diagnostic
+
+`GET /api/v1/auth/token-claims` is available only when `ENVIRONMENT=development`.
+It verifies the submitted access token normally and returns only `iss`, `aud`, and
+`permissions`; it never returns the raw token or profile claims. The route returns
+`404` outside development. Use it through Swagger as described in
+`ManualTestGuide/Auth0_API_Permissions_Swagger_Manual_Guide.md`.
 
 ### 5) Install dependencies
 
@@ -303,6 +317,10 @@ Notes:
 - Uploaded/manual ingest jobs are pushed to Redis and consumed by the background worker
 - All document and ingestion operations are authenticated and scoped to the current user
 - Repeated manual ingest calls are idempotent while an active job already exists
+- Document deletion removes recorded Pinecone vector IDs from the document owner’s
+  namespace before deleting the database record. If Pinecone is temporarily
+  unavailable, deletion returns `503` and leaves the document intact so it can be
+  retried safely.
 
 ### Current deduplication behavior
 

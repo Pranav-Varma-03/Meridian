@@ -58,7 +58,10 @@ async def test_openapi_contract_status_codes(api_client: AsyncClient) -> None:
     assert paths["/api/v1/documents/upload"]["post"]["responses"].get("202")
     assert paths["/api/v1/documents/{document_id}"]["delete"]["responses"].get("200")
     assert paths["/api/v1/ingest"]["post"]["responses"].get("202")
+    assert paths["/api/v1/ingest"]["post"]["responses"].get("403")
     assert paths["/api/v1/ingest/{job_id}"]["get"]["responses"].get("200")
+    assert paths["/api/v1/auth/token-claims"]["get"]["responses"].get("200")
+    assert paths["/api/v1/auth/token-claims"]["get"]["responses"].get("404")
     assert paths["/api/v1/chat"]["post"]["responses"].get("200")
 
 

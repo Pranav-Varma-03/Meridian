@@ -6,11 +6,12 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.auth import get_current_user
+from app.core.auth import get_current_user, require_document_reingest_permission
 from app.core.config import get_settings
 from app.core.database import get_db_session
 from app.models.entities import User
 from app.schemas import (
+    FORBIDDEN_RESPONSE,
     INTERNAL_ERROR_RESPONSE,
     NOT_FOUND_RESPONSE,
     UNAUTHORIZED_RESPONSE,
@@ -87,9 +88,13 @@ class IngestionJobResponse(BaseModel):
     response_model=IngestAcceptedResponse,
     status_code=202,
     summary="Queue ingestion job",
-    description="Creates a queued ingestion job for an existing user document.",
+    description=(
+        "Creates a queued re-ingestion job for an existing user document. "
+        "Requires the Auth0 `documents:reingest` permission."
+    ),
     responses={
         401: UNAUTHORIZED_RESPONSE,
+        403: FORBIDDEN_RESPONSE,
         404: NOT_FOUND_RESPONSE,
         422: VALIDATION_ERROR_RESPONSE,
         500: INTERNAL_ERROR_RESPONSE,
@@ -98,6 +103,7 @@ class IngestionJobResponse(BaseModel):
 async def queue_ingestion(
     payload: IngestRequest,
     request: Request,
+    _claims: dict = Depends(require_document_reingest_permission),
     current_user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_db_session),
 ):

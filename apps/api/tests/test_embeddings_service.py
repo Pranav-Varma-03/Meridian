@@ -53,9 +53,13 @@ class _DummyOpenAI:
 class _DummyPineconeIndex:
     def __init__(self) -> None:
         self.upserts = []
+        self.deletes = []
 
     def upsert(self, *, vectors, namespace):
         self.upserts.append({"vectors": vectors, "namespace": namespace})
+
+    def delete(self, *, ids, namespace):
+        self.deletes.append({"ids": ids, "namespace": namespace})
 
 
 class _DummyPinecone:
@@ -127,3 +131,65 @@ def test_upsert_embeddings_calls_pinecone_index_upsert() -> None:
     upsert_call = dummy_pinecone.index.upserts[0]
     assert upsert_call["namespace"] == "user:test"
     assert upsert_call["vectors"][0]["id"] == f"chunk:{chunk_id}"
+
+
+@pytest.mark.asyncio
+async def test_delete_embeddings_batches_ids_and_preserves_namespace() -> None:
+    dummy_pinecone = _DummyPinecone()
+
+    await embeddings.delete_embeddings(
+        dummy_pinecone,  # type: ignore[arg-type]
+        index_name="test-index",
+        namespace="user:test",
+        vector_ids=["one", "two", "one", "three"],
+        batch_size=2,
+        timeout_seconds=1,
+        max_attempts=1,
+    )
+
+    assert dummy_pinecone.index.deletes == [
+        {"ids": ["one", "two"], "namespace": "user:test"},
+        {"ids": ["three"], "namespace": "user:test"},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_delete_embeddings_empty_ids_skips_pinecone() -> None:
+    dummy_pinecone = _DummyPinecone()
+
+    await embeddings.delete_embeddings(
+        dummy_pinecone,  # type: ignore[arg-type]
+        index_name="test-index",
+        namespace="user:test",
+        vector_ids=[],
+        batch_size=2,
+        timeout_seconds=1,
+        max_attempts=1,
+    )
+
+    assert dummy_pinecone.index.deletes == []
+
+
+@pytest.mark.asyncio
+async def test_delete_embeddings_exposes_retryable_failure() -> None:
+    class _UnavailableIndex:
+        def delete(self, *, ids, namespace):
+            _ = (ids, namespace)
+            raise ConnectionError("Pinecone unavailable")
+
+    class _UnavailablePinecone:
+        def Index(self, _index_name):  # noqa: N802
+            return _UnavailableIndex()
+
+    with pytest.raises(embeddings.VectorDeletionError) as error:
+        await embeddings.delete_embeddings(
+            _UnavailablePinecone(),  # type: ignore[arg-type]
+            index_name="test-index",
+            namespace="user:test",
+            vector_ids=["one"],
+            batch_size=1,
+            timeout_seconds=1,
+            max_attempts=1,
+        )
+
+    assert error.value.retryable is True

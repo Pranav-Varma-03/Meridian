@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import time
+from collections.abc import Callable
 from typing import Any
 
 import httpx
@@ -71,36 +72,20 @@ async def verify_auth0_access_token(token: str) -> dict[str, Any]:
         raise HTTPException(status_code=401, detail="No matching JWKS key found")
 
     issuer = f"https://{settings.auth0_domain}/"
-    candidate_audiences: list[str] = []
-
-    if settings.auth0_audience:
-        candidate_audiences.append(settings.auth0_audience)
-    candidate_audiences.append(settings.auth0_client_id)
-
-    last_error: JWTError | None = None
-    claims: dict[str, Any] | None = None
-
-    for audience in candidate_audiences:
-        try:
-            claims = jwt.decode(
-                token,
-                public_key,
-                algorithms=["RS256"],
-                audience=audience,
-                issuer=issuer,
-            )
-            break
-        except JWTError as exc:
-            last_error = exc
-
-    if claims is None:
-        logger.warning(
-            "auth0_token_decode_failed: %s",
-            str(last_error) if last_error else "unknown",
+    try:
+        claims = jwt.decode(
+            token,
+            public_key,
+            algorithms=["RS256"],
+            audience=settings.auth0_audience,
+            issuer=issuer,
         )
-        raise HTTPException(
-            status_code=401, detail="Invalid or expired token"
-        ) from last_error
+    except JWTError as exc:
+        logger.warning(
+            "auth0_token_decode_failed",
+            extra={"reason": str(exc)},
+        )
+        raise HTTPException(status_code=401, detail="Invalid or expired token") from exc
 
     return claims
 
@@ -113,12 +98,41 @@ async def get_current_user_claims(
         token = credentials.credentials
     else:
         token = _extract_bearer_token(request)
-
     # Development-only debug output (requested): print bearer token with
     # one empty line above and one empty line below.
     print(f"\n{token}\n")
-
     return await verify_auth0_access_token(token)
+
+
+def _normalized_permissions(claims: dict[str, Any]) -> set[str]:
+    permissions = claims.get("permissions")
+    if not isinstance(permissions, list):
+        return set()
+    return {permission for permission in permissions if isinstance(permission, str)}
+
+
+def require_permission(permission: str) -> Callable[..., Any]:
+    """Create a dependency that permits only verified tokens with a permission."""
+
+    async def _require_permission(
+        request: Request,
+        claims: dict[str, Any] = Depends(get_current_user_claims),
+    ) -> dict[str, Any]:
+        if permission not in _normalized_permissions(claims):
+            logger.warning(
+                "auth0_permission_denied",
+                extra={
+                    "request_id": getattr(request.state, "request_id", "unknown"),
+                    "required_permission": permission,
+                },
+            )
+            raise HTTPException(status_code=403, detail="Insufficient permissions")
+        return claims
+
+    return _require_permission
+
+
+require_document_reingest_permission = require_permission("documents:reingest")
 
 
 async def get_current_user(

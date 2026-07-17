@@ -34,15 +34,8 @@ export default async function Home() {
   }
 
   try {
-    // Use ID token from the authenticated web session for provisioning.
-    // This avoids audience mismatches from access-token configuration.
-    const idToken = session.tokenSet?.idToken;
-
-    let bearerToken = idToken;
-    if (!bearerToken) {
-      const accessTokenResult = await auth0.getAccessToken();
-      bearerToken = accessTokenResult?.token;
-    }
+    const accessTokenResult = await auth0.getAccessToken();
+    const bearerToken = accessTokenResult?.token;
 
     if (bearerToken && apiBaseUrl) {
       const response = await fetch(`${apiBaseUrl}/api/v1/users/me`, {

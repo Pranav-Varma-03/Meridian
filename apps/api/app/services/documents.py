@@ -1,4 +1,6 @@
 import hashlib
+import logging
+import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -14,7 +16,9 @@ from app.models.entities import (
     IngestionJob,
     IngestionStatus,
 )
-from app.services import document_processor
+from app.services import document_processor, embeddings
+
+logger = logging.getLogger(__name__)
 
 
 class DocumentNotFoundError(Exception):
@@ -27,6 +31,10 @@ class CollectionNotFoundError(Exception):
 
 class IngestionJobNotFoundError(Exception):
     """Raised when an ingestion job is not found for the current user."""
+
+
+class VectorCleanupUnavailableError(Exception):
+    """Raised when document vectors could not be removed safely."""
 
 
 @dataclass(slots=True)
@@ -269,6 +277,12 @@ async def delete_document(
     *,
     user_id: uuid.UUID,
     document_id: uuid.UUID,
+    pinecone_client: object,
+    pinecone_index_name: str,
+    vector_delete_batch_size: int,
+    vector_delete_timeout_seconds: float,
+    vector_delete_max_attempts: int,
+    request_id: str,
 ) -> None:
     document = await session.scalar(
         select(Document).where(
@@ -279,6 +293,54 @@ async def delete_document(
     if document is None:
         raise DocumentNotFoundError("Document not found")
 
+    vector_ids = list(
+        (
+            await session.scalars(
+                select(DocumentChunk.vector_id).where(
+                    DocumentChunk.document_id == document.id,
+                    DocumentChunk.vector_id.is_not(None),
+                )
+            )
+        ).all()
+    )
+    namespace = embeddings.build_pinecone_namespace(user_id=user_id)
+    cleanup_started = time.perf_counter()
+    try:
+        await embeddings.delete_embeddings(
+            pinecone_client,  # type: ignore[arg-type]
+            index_name=pinecone_index_name,
+            namespace=namespace,
+            vector_ids=vector_ids,
+            batch_size=vector_delete_batch_size,
+            timeout_seconds=vector_delete_timeout_seconds,
+            max_attempts=vector_delete_max_attempts,
+        )
+    except embeddings.VectorDeletionError as exc:
+        logger.warning(
+            "document_vector_cleanup_failed",
+            extra={
+                "request_id": request_id,
+                "user_id": str(user_id),
+                "document_id": str(document_id),
+                "vector_count": len(vector_ids),
+                "duration_ms": round((time.perf_counter() - cleanup_started) * 1000, 2),
+                "retryable": exc.retryable,
+            },
+        )
+        raise VectorCleanupUnavailableError(
+            "Document cleanup is temporarily unavailable"
+        ) from exc
+
+    logger.info(
+        "document_vector_cleanup_completed",
+        extra={
+            "request_id": request_id,
+            "user_id": str(user_id),
+            "document_id": str(document_id),
+            "vector_count": len(vector_ids),
+            "duration_ms": round((time.perf_counter() - cleanup_started) * 1000, 2),
+        },
+    )
     await session.delete(document)
     await session.commit()
 

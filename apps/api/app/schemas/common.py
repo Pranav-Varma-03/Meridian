@@ -48,6 +48,16 @@ UNAUTHORIZED_RESPONSE = {
     },
 }
 
+FORBIDDEN_RESPONSE = {
+    "model": ErrorEnvelope,
+    "description": "Forbidden",
+    "content": {
+        "application/json": {
+            "example": error_example("HTTP_ERROR", "Insufficient permissions")
+        }
+    },
+}
+
 NOT_FOUND_RESPONSE = {
     "model": ErrorEnvelope,
     "description": "Resource not found",
@@ -100,6 +110,18 @@ INTERNAL_ERROR_RESPONSE = {
         "application/json": {
             "example": error_example(
                 "INTERNAL_SERVER_ERROR", "An unexpected error occurred"
+            )
+        }
+    },
+}
+
+SERVICE_UNAVAILABLE_RESPONSE = {
+    "model": ErrorEnvelope,
+    "description": "Temporary dependency failure",
+    "content": {
+        "application/json": {
+            "example": error_example(
+                "HTTP_ERROR", "Document cleanup is temporarily unavailable"
             )
         }
     },

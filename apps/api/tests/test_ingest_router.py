@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 
 import pytest
 import pytest_asyncio
+from fastapi import HTTPException
 from httpx import ASGITransport, AsyncClient
 
 # Ensure settings can load when importing app.main
@@ -33,7 +34,7 @@ os.environ.setdefault("AUTH0_DOMAIN", "example.auth0.com")
 os.environ.setdefault("AUTH0_AUDIENCE", "https://api.example.com")
 os.environ.setdefault("AUTH0_CLIENT_ID", "test-client-id")
 
-from app.core.auth import get_current_user
+from app.core.auth import get_current_user, require_document_reingest_permission
 from app.core.database import get_db_session
 from app.main import app
 from app.services import documents as document_service
@@ -55,7 +56,13 @@ def override_auth_and_db():
     async def _db_override():
         yield object()
 
+    async def _reingest_permission_override():
+        return {"permissions": ["documents:reingest"]}
+
     app.dependency_overrides[get_current_user] = _current_user_override
+    app.dependency_overrides[require_document_reingest_permission] = (
+        _reingest_permission_override
+    )
     app.dependency_overrides[get_db_session] = _db_override
     app.state.redis = object()
     try:
@@ -150,6 +157,27 @@ async def test_queue_ingestion_auth_failure(api_client: AsyncClient) -> None:
     )
 
     assert response.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_queue_ingestion_requires_reingest_permission(
+    api_client: AsyncClient,
+    override_auth_and_db,
+) -> None:
+    async def _deny_reingestion_permission():
+        raise HTTPException(status_code=403, detail="Insufficient permissions")
+
+    app.dependency_overrides[require_document_reingest_permission] = (
+        _deny_reingestion_permission
+    )
+
+    response = await api_client.post(
+        "/api/v1/ingest",
+        json={"document_id": str(uuid.uuid4())},
+    )
+
+    assert response.status_code == 403
+    assert response.json()["error"]["message"] == "Insufficient permissions"
 
 
 @pytest.mark.asyncio

@@ -3,7 +3,7 @@ from functools import lru_cache
 from typing import Annotated
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
-from pydantic import field_validator, model_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
@@ -39,6 +39,9 @@ class Settings(BaseSettings):
     # Pinecone
     pinecone_api_key: str
     pinecone_index_name: str
+    pinecone_vector_delete_batch_size: int = Field(default=100, gt=0, le=1000)
+    pinecone_vector_delete_timeout_seconds: float = Field(default=5.0, gt=0)
+    pinecone_vector_delete_max_attempts: int = Field(default=3, gt=0, le=10)
 
     # Auth0
     auth0_domain: str
