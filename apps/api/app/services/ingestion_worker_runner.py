@@ -4,6 +4,7 @@ import logging
 import redis.asyncio as redis
 from openai import AsyncOpenAI
 from pinecone import Pinecone
+from redis.exceptions import RedisError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
@@ -12,6 +13,7 @@ from app.services import (
     contextual_chunking,
     document_processor,
     embeddings,
+    generations,
     ingestion_worker,
 )
 
@@ -28,7 +30,12 @@ openai_client = (
 )
 
 
-async def _embed_chunks_with_retry(chunks, *, max_attempts: int = 3):
+async def _embed_chunks_with_retry(
+    chunks,
+    *,
+    generation_number: int | None = None,
+    max_attempts: int = 3,
+):
     for attempt in range(1, max_attempts + 1):
         try:
             return await embeddings.embed_chunks(
@@ -38,6 +45,11 @@ async def _embed_chunks_with_retry(chunks, *, max_attempts: int = 3):
                 input_type=settings.embedding_input_type,
                 pinecone_client=pinecone_client,
                 openai_client=openai_client,
+                **(
+                    {"generation_number": generation_number}
+                    if generation_number is not None
+                    else {}
+                ),
             )
         except Exception as exc:
             if attempt >= max_attempts:
@@ -138,16 +150,39 @@ async def default_ingestion_processor(
                 if chunk.contextualized_text
             }
 
-    await document_processor.replace_document_chunks(
-        session,
-        document_id=claimed_job.document.id,
-        chunks=chunks,
-    )
+    generation = getattr(claimed_job, "generation", None)
+    if generation is None:
+        # Compatibility path for legacy jobs created before migration 0003.
+        await document_processor.replace_document_chunks(
+            session, document_id=claimed_job.document.id, chunks=chunks
+        )
+        persisted_chunks = await document_processor.list_document_chunks(
+            session, document_id=claimed_job.document.id
+        )
+    else:
+        await document_processor.create_generation_chunks(
+            session,
+            document_id=claimed_job.document.id,
+            generation_id=generation.id,
+            chunks=chunks,
+        )
+        persisted_chunks = await document_processor.list_generation_chunks(
+            session, generation_id=generation.id
+        )
 
-    persisted_chunks = await document_processor.list_document_chunks(
-        session,
-        document_id=claimed_job.document.id,
-    )
+    # Keep retrieval and reconciliation metadata explicit and scalar for Pinecone.
+    for persisted_chunk in persisted_chunks:
+        persisted_chunk.metadata_json = {
+            **(getattr(persisted_chunk, "metadata_json", None) or {}),
+            "document_id": str(claimed_job.document.id),
+            "generation": generation.generation_number if generation else 0,
+            "user_id": str(claimed_job.document.user_id),
+            "collection_id": (
+                str(getattr(claimed_job.document, "collection_id", None))
+                if getattr(claimed_job.document, "collection_id", None)
+                else ""
+            ),
+        }
 
     chunks_for_embedding = []
     if settings.contextual_embedding_enabled:
@@ -159,9 +194,13 @@ async def default_ingestion_processor(
     else:
         chunks_for_embedding = persisted_chunks
 
-    embedded_chunks = await _embed_chunks_with_retry(
-        chunks_for_embedding,
-    )
+    if generation is None:
+        embedded_chunks = await _embed_chunks_with_retry(chunks_for_embedding)
+    else:
+        embedded_chunks = await _embed_chunks_with_retry(
+            chunks_for_embedding,
+            generation_number=generation.generation_number,
+        )
 
     namespace = embeddings.build_pinecone_namespace(
         user_id=claimed_job.document.user_id
@@ -175,6 +214,14 @@ async def default_ingestion_processor(
     for chunk_row in persisted_chunks:
         chunk_row.vector_id = embedded_lookup.get(chunk_row.id)
 
+    if generation is not None:
+        await generations.activate_generation(
+            session,
+            document_id=claimed_job.document.id,
+            generation_id=generation.id,
+            vector_ids=[item.vector_id for item in embedded_chunks],
+        )
+
     logger.info(
         "processing_ingestion_job",
         extra={
@@ -187,8 +234,21 @@ async def default_ingestion_processor(
 
 
 async def run_worker_loop() -> None:
-    redis_client = redis.from_url(settings.redis_url, decode_responses=True)
-    await redis_client.ping()
+    redis_client = redis.from_url(
+        settings.redis_url,
+        decode_responses=True,
+        socket_connect_timeout=10,
+        # The socket timeout must outlast the intentionally blocking BLPOP.
+        socket_timeout=settings.ingestion_worker_dequeue_timeout_seconds + 5,
+        health_check_interval=30,
+    )
+    try:
+        await redis_client.ping()
+    except RedisError as exc:
+        logger.warning(
+            "ingestion_queue_startup_unavailable_using_database_fallback",
+            extra={"error_type": type(exc).__name__},
+        )
 
     logger.info(
         "ingestion_worker_started",
@@ -214,7 +274,10 @@ async def run_worker_loop() -> None:
             if not processed:
                 await asyncio.sleep(settings.ingestion_worker_idle_sleep_seconds)
     finally:
-        await redis_client.aclose()
+        try:
+            await redis_client.aclose()
+        except RedisError:
+            logger.debug("ingestion_queue_close_failed", exc_info=True)
 
 
 def main() -> None:

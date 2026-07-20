@@ -349,6 +349,30 @@ async def replace_document_chunks(
     return len(chunks)
 
 
+async def create_generation_chunks(
+    session: AsyncSession,
+    *,
+    document_id: uuid.UUID,
+    generation_id: uuid.UUID,
+    chunks: list[ChunkPayload],
+) -> int:
+    """Persist chunks for a pending generation without mutating active chunks."""
+    for chunk in chunks:
+        session.add(
+            DocumentChunk(
+                document_id=document_id,
+                generation_id=generation_id,
+                chunk_index=chunk.chunk_index,
+                token_count=chunk.token_count,
+                chunk_text=chunk.chunk_text,
+                vector_id=None,
+                metadata_json=chunk.metadata,
+            )
+        )
+    await session.flush()
+    return len(chunks)
+
+
 async def list_document_chunks(
     session: AsyncSession,
     *,
@@ -357,6 +381,19 @@ async def list_document_chunks(
     result = await session.execute(
         select(DocumentChunk)
         .where(DocumentChunk.document_id == document_id)
+        .order_by(DocumentChunk.chunk_index.asc())
+    )
+    return list(result.scalars().all())
+
+
+async def list_generation_chunks(
+    session: AsyncSession,
+    *,
+    generation_id: uuid.UUID,
+) -> list[DocumentChunk]:
+    result = await session.execute(
+        select(DocumentChunk)
+        .where(DocumentChunk.generation_id == generation_id)
         .order_by(DocumentChunk.chunk_index.asc())
     )
     return list(result.scalars().all())

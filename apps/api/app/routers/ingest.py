@@ -27,11 +27,13 @@ settings = get_settings()
 
 class IngestRequest(BaseModel):
     document_id: uuid.UUID
+    reason: str
 
     model_config = ConfigDict(
         json_schema_extra={
             "example": {
                 "document_id": "9f4f8cce-b7b4-4a0a-b529-4f6f5906d5e4",
+                "reason": "manual_repair",
             }
         }
     )
@@ -112,9 +114,12 @@ async def queue_ingestion(
             session,
             user_id=current_user.id,
             document_id=payload.document_id,
+            reason=payload.reason,
         )
     except document_service.DocumentNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     if result.created_new_job:
         try:

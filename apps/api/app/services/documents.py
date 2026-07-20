@@ -1,6 +1,4 @@
 import hashlib
-import logging
-import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -13,12 +11,16 @@ from app.models.entities import (
     Collection,
     Document,
     DocumentChunk,
+    DocumentIngestionGeneration,
+    DocumentLifecycleStatus,
+    GenerationStatus,
     IngestionJob,
     IngestionStatus,
+    OutboxEvent,
+    PurgeJob,
+    PurgeJobStatus,
 )
-from app.services import document_processor, embeddings
-
-logger = logging.getLogger(__name__)
+from app.services import document_processor
 
 
 class DocumentNotFoundError(Exception):
@@ -31,10 +33,6 @@ class CollectionNotFoundError(Exception):
 
 class IngestionJobNotFoundError(Exception):
     """Raised when an ingestion job is not found for the current user."""
-
-
-class VectorCleanupUnavailableError(Exception):
-    """Raised when document vectors could not be removed safely."""
 
 
 @dataclass(slots=True)
@@ -56,6 +54,13 @@ class IngestionJobWithDocument:
     job: IngestionJob
     document: Document
     created_new_job: bool = True
+
+
+REINGESTION_REASONS = {
+    "model_migration",
+    "chunking_change",
+    "manual_repair",
+}
 
 
 async def create_uploaded_document(
@@ -85,6 +90,7 @@ async def create_uploaded_document(
             select(Document).where(
                 Document.user_id == user_id,
                 Document.file_hash == file_hash,
+                Document.lifecycle_status == DocumentLifecycleStatus.active,
             )
         )
         if existing_document is None:
@@ -129,9 +135,34 @@ async def create_uploaded_document(
             )
 
         # Legacy/self-heal fallback for documents without any recorded ingestion job.
-        existing_document.status = IngestionStatus.queued
+        generation = await session.scalar(
+            select(DocumentIngestionGeneration)
+            .where(
+                DocumentIngestionGeneration.document_id == existing_document.id,
+                DocumentIngestionGeneration.status == GenerationStatus.pending,
+            )
+            .order_by(DocumentIngestionGeneration.generation_number.desc())
+        )
+        if generation is None:
+            latest_generation = await session.scalar(
+                select(func.max(DocumentIngestionGeneration.generation_number)).where(
+                    DocumentIngestionGeneration.document_id == existing_document.id
+                )
+            )
+            generation = DocumentIngestionGeneration(
+                document_id=existing_document.id,
+                generation_number=int(latest_generation or 0) + 1,
+                status=GenerationStatus.pending,
+                reason="manual_repair",
+                configuration_json={},
+            )
+            session.add(generation)
+            await session.flush()
+        if existing_document.active_generation_id is None:
+            existing_document.status = IngestionStatus.queued
         repair_job = IngestionJob(
             document_id=existing_document.id,
+            generation_id=generation.id,
             status=IngestionStatus.queued,
             attempts=0,
         )
@@ -183,8 +214,19 @@ async def create_uploaded_document(
     session.add(document)
     await session.flush()
 
+    generation = DocumentIngestionGeneration(
+        document_id=document.id,
+        generation_number=1,
+        status=GenerationStatus.pending,
+        reason="upload",
+        configuration_json={},
+    )
+    session.add(generation)
+    await session.flush()
+
     job = IngestionJob(
         document_id=document.id,
+        generation_id=generation.id,
         status=IngestionStatus.queued,
         attempts=0,
     )
@@ -227,7 +269,10 @@ async def list_documents(
         if collection_exists is None:
             raise CollectionNotFoundError("Collection not found")
 
-    filters = [Document.user_id == user_id]
+    filters = [
+        Document.user_id == user_id,
+        Document.lifecycle_status == DocumentLifecycleStatus.active,
+    ]
     if collection_id is not None:
         filters.append(Document.collection_id == collection_id)
 
@@ -262,6 +307,7 @@ async def get_document(
         .where(
             Document.user_id == user_id,
             Document.id == document_id,
+            Document.lifecycle_status == DocumentLifecycleStatus.active,
         )
         .group_by(Document.id)
     )
@@ -277,72 +323,34 @@ async def delete_document(
     *,
     user_id: uuid.UUID,
     document_id: uuid.UUID,
-    pinecone_client: object,
-    pinecone_index_name: str,
-    vector_delete_batch_size: int,
-    vector_delete_timeout_seconds: float,
-    vector_delete_max_attempts: int,
-    request_id: str,
-) -> None:
+) -> PurgeJob:
     document = await session.scalar(
         select(Document).where(
             Document.user_id == user_id,
             Document.id == document_id,
+            Document.lifecycle_status == DocumentLifecycleStatus.active,
+            Document.lifecycle_status == DocumentLifecycleStatus.active,
         )
     )
     if document is None:
         raise DocumentNotFoundError("Document not found")
 
-    vector_ids = list(
-        (
-            await session.scalars(
-                select(DocumentChunk.vector_id).where(
-                    DocumentChunk.document_id == document.id,
-                    DocumentChunk.vector_id.is_not(None),
-                )
-            )
-        ).all()
+    document.lifecycle_status = DocumentLifecycleStatus.deleting
+    purge_job = PurgeJob(
+        document_id=document.id,
+        status=PurgeJobStatus.queued,
+        idempotency_key=f"document-purge:{document.id}",
     )
-    namespace = embeddings.build_pinecone_namespace(user_id=user_id)
-    cleanup_started = time.perf_counter()
-    try:
-        await embeddings.delete_embeddings(
-            pinecone_client,  # type: ignore[arg-type]
-            index_name=pinecone_index_name,
-            namespace=namespace,
-            vector_ids=vector_ids,
-            batch_size=vector_delete_batch_size,
-            timeout_seconds=vector_delete_timeout_seconds,
-            max_attempts=vector_delete_max_attempts,
+    session.add(purge_job)
+    session.add(
+        OutboxEvent(
+            topic="document_purge",
+            payload_json={"purge_job_id": str(purge_job.id)},
         )
-    except embeddings.VectorDeletionError as exc:
-        logger.warning(
-            "document_vector_cleanup_failed",
-            extra={
-                "request_id": request_id,
-                "user_id": str(user_id),
-                "document_id": str(document_id),
-                "vector_count": len(vector_ids),
-                "duration_ms": round((time.perf_counter() - cleanup_started) * 1000, 2),
-                "retryable": exc.retryable,
-            },
-        )
-        raise VectorCleanupUnavailableError(
-            "Document cleanup is temporarily unavailable"
-        ) from exc
-
-    logger.info(
-        "document_vector_cleanup_completed",
-        extra={
-            "request_id": request_id,
-            "user_id": str(user_id),
-            "document_id": str(document_id),
-            "vector_count": len(vector_ids),
-            "duration_ms": round((time.perf_counter() - cleanup_started) * 1000, 2),
-        },
     )
-    await session.delete(document)
     await session.commit()
+    await session.refresh(purge_job)
+    return purge_job
 
 
 async def create_ingestion_job(
@@ -350,6 +358,7 @@ async def create_ingestion_job(
     *,
     user_id: uuid.UUID,
     document_id: uuid.UUID,
+    reason: str,
 ) -> IngestionJobWithDocument:
     document = await session.scalar(
         select(Document).where(
@@ -359,6 +368,8 @@ async def create_ingestion_job(
     )
     if document is None:
         raise DocumentNotFoundError("Document not found")
+    if reason not in REINGESTION_REASONS:
+        raise ValueError("Unsupported re-ingestion reason")
 
     active_job = await session.scalar(
         select(IngestionJob)
@@ -380,10 +391,26 @@ async def create_ingestion_job(
             created_new_job=False,
         )
 
-    document.status = IngestionStatus.queued
+    latest_generation = await session.scalar(
+        select(DocumentIngestionGeneration.generation_number)
+        .where(DocumentIngestionGeneration.document_id == document.id)
+        .order_by(DocumentIngestionGeneration.generation_number.desc())
+        .limit(1)
+    )
+    next_generation_number = int(latest_generation or 0) + 1
+    generation = DocumentIngestionGeneration(
+        document_id=document.id,
+        generation_number=next_generation_number,
+        status=GenerationStatus.pending,
+        reason=reason,
+        configuration_json={},
+    )
+    session.add(generation)
+    await session.flush()
 
     job = IngestionJob(
         document_id=document.id,
+        generation_id=generation.id,
         status=IngestionStatus.queued,
         attempts=0,
     )

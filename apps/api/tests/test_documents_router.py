@@ -383,7 +383,7 @@ async def test_delete_document_success(
 
     assert response.status_code == 200
     payload = response.json()
-    assert payload["message"] == "Document deleted successfully"
+    assert payload["message"] == "Document deleted and cleanup queued"
 
 
 @pytest.mark.asyncio
@@ -399,24 +399,3 @@ async def test_delete_document_not_found(
     response = await api_client.delete(f"/api/v1/documents/{uuid.uuid4()}")
 
     assert response.status_code == 404
-
-
-@pytest.mark.asyncio
-async def test_delete_document_vector_cleanup_unavailable(
-    api_client: AsyncClient,
-    override_auth_and_db,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    async def _delete(_session, **_kwargs):
-        raise document_service.VectorCleanupUnavailableError(
-            "Document cleanup is temporarily unavailable"
-        )
-
-    monkeypatch.setattr(document_service, "delete_document", _delete)
-    response = await api_client.delete(f"/api/v1/documents/{uuid.uuid4()}")
-
-    assert response.status_code == 503
-    assert (
-        response.json()["error"]["message"]
-        == "Document cleanup is temporarily unavailable"
-    )

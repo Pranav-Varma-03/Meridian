@@ -252,10 +252,23 @@ make dev
 
 ### Start ingestion worker
 
-Run the worker in a separate terminal during local ingestion testing:
+Run all background workers in a separate terminal during local ingestion testing:
 
 ```bash
 make dev-worker
+```
+
+The terminal lists the running ingestion and purge workers with their PIDs.
+Press `Ctrl+C` once to stop both. Use `make dev-purge-worker` only when you
+intentionally need the cleanup worker by itself.
+
+### Start purge worker
+
+Run this separately to remove vectors/files for logically deleted documents and
+superseded ingestion generations:
+
+```bash
+make dev-purge-worker
 ```
 
 Direct worker command:

@@ -51,6 +51,7 @@ async def embed_chunks(
     chunks: list[DocumentChunk],
     pinecone_client: Pinecone | None = None,
     openai_client: AsyncOpenAI | None = None,
+    generation_number: int | None = None,
 ) -> list[EmbeddedChunk]:
     if not chunks:
         return []
@@ -95,13 +96,18 @@ async def embed_chunks(
             values = getattr(item, "values", None)
             if values is None:
                 values = getattr(item, "embedding", [])
-        vector_id = f"chunk:{chunk.id}"
+        vector_id = (
+            f"doc:{chunk.document_id}:gen:{generation_number}:chunk:{chunk.chunk_index}"
+            if generation_number is not None
+            else f"chunk:{chunk.id}"
+        )
         metadata = _normalize_metadata(chunk.metadata_json)
         metadata.update(
             {
                 "chunk_id": str(chunk.id),
                 "document_id": str(chunk.document_id),
                 "chunk_index": chunk.chunk_index,
+                "generation": generation_number if generation_number is not None else 0,
             }
         )
         embedded.append(

@@ -25,6 +25,28 @@ class IngestionStatus(enum.StrEnum):
     failed = "failed"
 
 
+class DocumentLifecycleStatus(enum.StrEnum):
+    active = "active"
+    deleting = "deleting"
+    deleted = "deleted"
+
+
+class GenerationStatus(enum.StrEnum):
+    pending = "pending"
+    active = "active"
+    superseded = "superseded"
+    failed = "failed"
+    purged = "purged"
+
+
+class PurgeJobStatus(enum.StrEnum):
+    queued = "queued"
+    running = "running"
+    retryable = "retryable"
+    complete = "complete"
+    terminal_failed = "terminal_failed"
+
+
 class MessageRole(enum.StrEnum):
     user = "user"
     assistant = "assistant"
@@ -113,6 +135,15 @@ class Document(Base):
         default=IngestionStatus.queued,
         nullable=False,
     )
+    lifecycle_status: Mapped[DocumentLifecycleStatus] = mapped_column(
+        Enum(DocumentLifecycleStatus, name="document_lifecycle_status"),
+        default=DocumentLifecycleStatus.active,
+        nullable=False,
+        index=True,
+    )
+    active_generation_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), nullable=True, index=True
+    )
     metadata_json: Mapped[dict] = mapped_column(
         "metadata", JSONB, default=dict, nullable=False
     )
@@ -126,6 +157,12 @@ class Document(Base):
         back_populates="document", cascade="all, delete-orphan"
     )
     ingestion_jobs: Mapped[list["IngestionJob"]] = relationship(
+        back_populates="document", cascade="all, delete-orphan"
+    )
+    generations: Mapped[list["DocumentIngestionGeneration"]] = relationship(
+        back_populates="document", cascade="all, delete-orphan"
+    )
+    purge_jobs: Mapped[list["PurgeJob"]] = relationship(
         back_populates="document", cascade="all, delete-orphan"
     )
 
@@ -142,6 +179,9 @@ class DocumentChunk(Base):
         nullable=False,
         index=True,
     )
+    generation_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), nullable=True, index=True
+    )
     chunk_index: Mapped[int] = mapped_column(Integer, nullable=False)
     token_count: Mapped[int] = mapped_column(Integer, nullable=False)
     chunk_text: Mapped[str] = mapped_column(Text, nullable=False)
@@ -156,6 +196,77 @@ class DocumentChunk(Base):
     document: Mapped[Document] = relationship(back_populates="chunks")
 
 
+class DocumentIngestionGeneration(Base):
+    __tablename__ = "document_ingestion_generations"
+    __table_args__ = (
+        Index(
+            "uq_document_generation_number",
+            "document_id",
+            "generation_number",
+            unique=True,
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    document_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("documents.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    generation_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[GenerationStatus] = mapped_column(
+        Enum(GenerationStatus, name="document_generation_status"),
+        nullable=False,
+        default=GenerationStatus.pending,
+        index=True,
+    )
+    reason: Mapped[str] = mapped_column(String(64), nullable=False)
+    configuration_json: Mapped[dict] = mapped_column(
+        "configuration", JSONB, default=dict, nullable=False
+    )
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    activated_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    document: Mapped[Document] = relationship(back_populates="generations")
+    vector_manifest: Mapped[list["GenerationVectorManifest"]] = relationship(
+        back_populates="generation", cascade="all, delete-orphan"
+    )
+    purge_jobs: Mapped[list["PurgeJob"]] = relationship(back_populates="generation")
+
+
+class GenerationVectorManifest(Base):
+    __tablename__ = "generation_vector_manifests"
+    __table_args__ = (
+        Index("uq_generation_vector_id", "generation_id", "vector_id", unique=True),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    generation_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("document_ingestion_generations.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    vector_id: Mapped[str] = mapped_column(String(512), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    generation: Mapped[DocumentIngestionGeneration] = relationship(
+        back_populates="vector_manifest"
+    )
+
+
 class IngestionJob(Base):
     __tablename__ = "ingestion_jobs"
 
@@ -167,6 +278,9 @@ class IngestionJob(Base):
         ForeignKey("documents.id", ondelete="CASCADE"),
         nullable=False,
         index=True,
+    )
+    generation_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), nullable=True, index=True
     )
     status: Mapped[IngestionStatus] = mapped_column(
         Enum(IngestionStatus, name="ingestion_job_status"),
@@ -186,6 +300,72 @@ class IngestionJob(Base):
     )
 
     document: Mapped[Document] = relationship(back_populates="ingestion_jobs")
+
+
+class PurgeJob(Base):
+    __tablename__ = "purge_jobs"
+    __table_args__ = (
+        Index("uq_purge_job_idempotency_key", "idempotency_key", unique=True),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    document_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("documents.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    generation_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("document_ingestion_generations.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+    )
+    status: Mapped[PurgeJobStatus] = mapped_column(
+        Enum(PurgeJobStatus, name="purge_job_status"),
+        nullable=False,
+        default=PurgeJobStatus.queued,
+        index=True,
+    )
+    idempotency_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    next_attempt_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True
+    )
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    document: Mapped[Document] = relationship(back_populates="purge_jobs")
+    generation: Mapped[DocumentIngestionGeneration | None] = relationship(
+        back_populates="purge_jobs"
+    )
+
+
+class OutboxEvent(Base):
+    __tablename__ = "outbox_events"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    topic: Mapped[str] = mapped_column(String(120), nullable=False, index=True)
+    payload_json: Mapped[dict] = mapped_column("payload", JSONB, nullable=False)
+    available_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False, index=True
+    )
+    published_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True
+    )
+    attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
 
 
 class Conversation(Base):

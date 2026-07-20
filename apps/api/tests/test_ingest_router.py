@@ -96,7 +96,7 @@ async def test_queue_ingestion_happy_path(
 
     response = await api_client.post(
         "/api/v1/ingest",
-        json={"document_id": str(uuid.uuid4())},
+        json={"document_id": str(uuid.uuid4()), "reason": "manual_repair"},
     )
 
     assert response.status_code == 202
@@ -136,7 +136,7 @@ async def test_queue_ingestion_returns_existing_active_job(
 
     response = await api_client.post(
         "/api/v1/ingest",
-        json={"document_id": str(existing_document_id)},
+        json={"document_id": str(existing_document_id), "reason": "manual_repair"},
     )
 
     assert response.status_code == 202
@@ -153,7 +153,7 @@ async def test_queue_ingestion_returns_existing_active_job(
 async def test_queue_ingestion_auth_failure(api_client: AsyncClient) -> None:
     response = await api_client.post(
         "/api/v1/ingest",
-        json={"document_id": str(uuid.uuid4())},
+        json={"document_id": str(uuid.uuid4()), "reason": "manual_repair"},
     )
 
     assert response.status_code == 401
@@ -173,7 +173,7 @@ async def test_queue_ingestion_requires_reingest_permission(
 
     response = await api_client.post(
         "/api/v1/ingest",
-        json={"document_id": str(uuid.uuid4())},
+        json={"document_id": str(uuid.uuid4()), "reason": "manual_repair"},
     )
 
     assert response.status_code == 403
@@ -192,7 +192,7 @@ async def test_queue_ingestion_not_found(
     monkeypatch.setattr(document_service, "create_ingestion_job", _create_job)
     response = await api_client.post(
         "/api/v1/ingest",
-        json={"document_id": str(uuid.uuid4())},
+        json={"document_id": str(uuid.uuid4()), "reason": "manual_repair"},
     )
 
     assert response.status_code == 404

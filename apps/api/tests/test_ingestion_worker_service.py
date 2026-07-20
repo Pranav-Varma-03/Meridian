@@ -1,9 +1,11 @@
+import types
 import uuid
 from datetime import UTC, datetime
 
 import pytest
+from redis.exceptions import TimeoutError as RedisTimeoutError
 
-from app.models.entities import IngestionStatus
+from app.models.entities import GenerationStatus, IngestionStatus
 from app.services import document_processor
 from app.services import ingestion_worker as worker_service
 
@@ -21,9 +23,23 @@ class DummyRedis:
         return self._blpop_result
 
 
+class TimeoutRedis(DummyRedis):
+    async def blpop(self, queue_key: str, timeout: int):
+        _ = queue_key, timeout
+        raise RedisTimeoutError("read timed out")
+
+
 class DummySession:
     def __init__(self, *, rows: list[tuple[object, object]]):
-        self._rows = list(rows)
+        self._rows = [
+            (
+                *row,
+                types.SimpleNamespace(id=uuid.uuid4(), status=GenerationStatus.pending),
+            )
+            if len(row) == 2
+            else row
+            for row in rows
+        ]
         self.commits = 0
         self.rollbacks = 0
         self.refresh_calls: list[object] = []
@@ -64,12 +80,14 @@ class DummyJob:
         self.completed_at = None
         self.error = None
         self.created_at = datetime.now(UTC)
+        self.generation_id = uuid.uuid4()
 
 
 class DummyDocument:
     def __init__(self, *, status: IngestionStatus):
         self.id = uuid.uuid4()
         self.status = status
+        self.active_generation_id = None
 
 
 @pytest.mark.asyncio
@@ -84,6 +102,17 @@ async def test_enqueue_ingestion_job_pushes_to_redis_queue() -> None:
     )
 
     assert redis_client.rpush_calls == [("ingestion:jobs", str(job_id))]
+
+
+@pytest.mark.asyncio
+async def test_dequeue_timeout_uses_database_fallback() -> None:
+    job_id = await worker_service.dequeue_ingestion_job(
+        TimeoutRedis(),
+        queue_key="ingestion:jobs",
+        timeout_seconds=5,
+    )
+
+    assert job_id is None
 
 
 @pytest.mark.asyncio
@@ -129,6 +158,19 @@ async def test_mark_ingestion_job_ready_sets_terminal_ready() -> None:
     assert job.completed_at is not None
     assert job.error is None
     assert session.commits == 1
+
+
+@pytest.mark.asyncio
+async def test_mark_ingestion_job_ready_updates_active_generation_document() -> None:
+    job = DummyJob(status=IngestionStatus.processing, attempts=1)
+    document = DummyDocument(status=IngestionStatus.processing)
+    document.active_generation_id = uuid.uuid4()
+    session = DummySession(rows=[(job, document)])
+
+    await worker_service.mark_ingestion_job_ready(session, job_id=job.id)
+
+    assert job.status == IngestionStatus.ready
+    assert document.status == IngestionStatus.ready
 
 
 @pytest.mark.asyncio
@@ -226,7 +268,16 @@ async def test_process_next_ingestion_job_persists_chunks_before_ready_transitio
             if query_name == "Delete":
                 self.delete_executed = True
                 return _Result(None)
-            return _Result((self.job_obj, self.document_obj))
+            return _Result(
+                (
+                    self.job_obj,
+                    self.document_obj,
+                    types.SimpleNamespace(
+                        id=self.job_obj.generation_id,
+                        status=GenerationStatus.pending,
+                    ),
+                )
+            )
 
         async def commit(self):
             self.commits += 1

@@ -1,4 +1,4 @@
-.PHONY: setup dev dev-api dev-web dev-worker install test lint format db-migrate clean
+.PHONY: setup dev dev-api dev-web dev-worker dev-purge-worker install test lint format db-migrate clean
 
 # ═══════════════════════════════════════════════════════════════
 # Meridian RAG System - Makefile
@@ -41,9 +41,32 @@ dev:
 dev-api:
 	cd apps/api && .venv/bin/uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 
-# Start ingestion worker only (uses local venv)
+# Start all background workers (uses local venv). Ctrl+C stops both workers.
 dev-worker:
-	cd apps/api && .venv/bin/python -m app.services.ingestion_worker_runner
+	@cd apps/api && \
+		set -e; \
+		stopping=0; \
+		cleanup() { \
+			[ "$$stopping" -eq 0 ] || return; \
+			stopping=1; \
+			echo "Stopping Meridian workers..."; \
+			kill $$ingestion_pid $$purge_pid 2>/dev/null || true; \
+			wait $$ingestion_pid $$purge_pid 2>/dev/null || true; \
+		}; \
+		trap 'cleanup; exit 0' INT TERM; \
+		trap cleanup EXIT; \
+		.venv/bin/python -m app.services.ingestion_worker_runner & ingestion_pid=$$!; \
+		.venv/bin/python -m app.services.purge_worker_runner & purge_pid=$$!; \
+		echo "Meridian workers running:"; \
+		echo "  ingestion  pid=$$ingestion_pid  (parsing, chunking, embeddings, upserts)"; \
+		echo "  purge      pid=$$purge_pid  (superseded vectors and deleted files)"; \
+		echo "Press Ctrl+C to stop all workers."; \
+		wait $$ingestion_pid; \
+		wait $$purge_pid
+
+# Start only the durable vector/file cleanup worker.
+dev-purge-worker:
+	cd apps/api && .venv/bin/python -m app.services.purge_worker_runner
 
 # Start frontend only (uses local node_modules)
 dev-web:
@@ -146,7 +169,8 @@ help:
 	@echo "  make dev        - Start frontend + backend"
 	@echo "  make dev-api    - Start backend only"
 	@echo "  make dev-web    - Start frontend only"
-	@echo "  make dev-worker - Start ingestion worker only"
+	@echo "  make dev-worker - Start ingestion and purge workers"
+	@echo "  make dev-purge-worker - Start purge worker only"
 	@echo ""
 	@echo "Testing:"
 	@echo "  make test       - Run all tests"
