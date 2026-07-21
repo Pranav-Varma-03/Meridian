@@ -24,6 +24,10 @@ class Settings(BaseSettings):
     ingestion_worker_dequeue_timeout_seconds: int
     ingestion_worker_max_attempts: int
     ingestion_worker_idle_sleep_seconds: float
+    ingestion_retry_base_seconds: float = Field(default=1.0, gt=0, le=300)
+    ingestion_retry_max_seconds: float = Field(default=300.0, gt=0, le=3600)
+    ingestion_worker_stuck_timeout_seconds: float = Field(default=900.0, gt=0, le=86400)
+    purge_worker_stuck_timeout_seconds: float = Field(default=900.0, gt=0, le=86400)
 
     # OpenAI
     openai_api_key: str | None = None

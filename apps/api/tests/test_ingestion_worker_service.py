@@ -5,7 +5,11 @@ from datetime import UTC, datetime
 import pytest
 from redis.exceptions import TimeoutError as RedisTimeoutError
 
-from app.models.entities import GenerationStatus, IngestionStatus
+from app.models.entities import (
+    DocumentLifecycleStatus,
+    GenerationStatus,
+    IngestionStatus,
+)
 from app.services import document_processor
 from app.services import ingestion_worker as worker_service
 
@@ -43,6 +47,7 @@ class DummySession:
         self.commits = 0
         self.rollbacks = 0
         self.refresh_calls: list[object] = []
+        self.added: list[object] = []
 
     async def execute(self, _query):
         row = self._rows.pop(0) if self._rows else None
@@ -65,6 +70,18 @@ class DummySession:
     async def refresh(self, item):
         self.refresh_calls.append(item)
 
+    async def scalar(self, _query):
+        # Failed-generation purge lookup: no existing job in this test double.
+        return None
+
+    def add(self, item):
+        self.added.append(item)
+        if getattr(item, "id", None) is None:
+            item.id = uuid.uuid4()
+
+    async def flush(self):
+        return None
+
 
 class DummyJob:
     def __init__(
@@ -79,6 +96,7 @@ class DummyJob:
         self.started_at = None
         self.completed_at = None
         self.error = None
+        self.next_attempt_at = None
         self.created_at = datetime.now(UTC)
         self.generation_id = uuid.uuid4()
 
@@ -88,6 +106,7 @@ class DummyDocument:
         self.id = uuid.uuid4()
         self.status = status
         self.active_generation_id = None
+        self.lifecycle_status = DocumentLifecycleStatus.active
 
 
 @pytest.mark.asyncio
@@ -146,6 +165,165 @@ async def test_claim_ingestion_job_skips_non_queued_job() -> None:
 
 
 @pytest.mark.asyncio
+async def test_claim_ingestion_job_fences_deleting_document_and_queues_purge() -> None:
+    job = DummyJob(status=IngestionStatus.queued, attempts=0)
+    document = DummyDocument(status=IngestionStatus.queued)
+    document.lifecycle_status = DocumentLifecycleStatus.deleting
+    generation = types.SimpleNamespace(
+        id=job.generation_id,
+        status=GenerationStatus.pending,
+        error=None,
+    )
+    session = DummySession(rows=[(job, document, generation)])
+
+    claimed = await worker_service.claim_ingestion_job(session, job_id=job.id)
+
+    assert claimed is None
+    assert job.status == IngestionStatus.failed
+    assert generation.status == GenerationStatus.failed
+    assert any(item.__class__.__name__ == "PurgeJob" for item in session.added)
+
+
+@pytest.mark.asyncio
+async def test_recover_stuck_active_generation_marks_job_ready() -> None:
+    job = DummyJob(status=IngestionStatus.processing, attempts=1)
+    job.started_at = datetime(2020, 1, 1, tzinfo=UTC)
+    document = DummyDocument(status=IngestionStatus.processing)
+    document.active_generation_id = job.generation_id
+    generation = types.SimpleNamespace(
+        id=job.generation_id,
+        status=GenerationStatus.active,
+        error=None,
+    )
+
+    class RecoverySession:
+        def __init__(self):
+            self.commits = 0
+            self.rollbacks = 0
+
+        async def execute(self, _query):
+            class Result:
+                def all(self):
+                    return [(job, document, generation)]
+
+            return Result()
+
+        async def commit(self):
+            self.commits += 1
+
+        async def rollback(self):
+            self.rollbacks += 1
+
+    session = RecoverySession()
+    recovered = await worker_service.recover_stuck_ingestion_jobs(
+        session,  # type: ignore[arg-type]
+        stuck_timeout_seconds=1,
+        max_attempts=3,
+        retry_base_seconds=1,
+        retry_max_seconds=10,
+    )
+
+    assert recovered == 1
+    assert job.status == IngestionStatus.ready
+    assert job.completed_at is not None
+    assert session.commits == 1
+
+
+@pytest.mark.asyncio
+async def test_recover_stuck_pending_generation_requeues_safely() -> None:
+    job = DummyJob(status=IngestionStatus.processing, attempts=1)
+    job.started_at = datetime(2020, 1, 1, tzinfo=UTC)
+    document = DummyDocument(status=IngestionStatus.processing)
+    generation = types.SimpleNamespace(
+        id=job.generation_id,
+        status=GenerationStatus.pending,
+        error=None,
+    )
+
+    class RecoverySession:
+        async def execute(self, _query):
+            class Result:
+                def all(self):
+                    return [(job, document, generation)]
+
+            return Result()
+
+        async def commit(self):
+            return None
+
+        async def rollback(self):
+            return None
+
+    recovered = await worker_service.recover_stuck_ingestion_jobs(
+        RecoverySession(),  # type: ignore[arg-type]
+        stuck_timeout_seconds=1,
+        max_attempts=3,
+        retry_base_seconds=1,
+        retry_max_seconds=10,
+    )
+
+    assert recovered == 1
+    assert job.status == IngestionStatus.queued
+    assert job.next_attempt_at is not None
+    assert document.status == IngestionStatus.queued
+
+
+@pytest.mark.asyncio
+async def test_recover_stuck_job_for_deleting_document_queues_cleanup() -> None:
+    job = DummyJob(status=IngestionStatus.processing, attempts=1)
+    job.started_at = datetime(2020, 1, 1, tzinfo=UTC)
+    document = DummyDocument(status=IngestionStatus.processing)
+    document.lifecycle_status = DocumentLifecycleStatus.deleting
+    generation = types.SimpleNamespace(
+        id=job.generation_id,
+        status=GenerationStatus.pending,
+        error=None,
+    )
+
+    class RecoverySession:
+        def __init__(self):
+            self.added: list[object] = []
+
+        async def execute(self, _query):
+            class Result:
+                def all(self):
+                    return [(job, document, generation)]
+
+            return Result()
+
+        async def scalar(self, _query):
+            return None
+
+        def add(self, item):
+            self.added.append(item)
+            if getattr(item, "id", None) is None:
+                item.id = uuid.uuid4()
+
+        async def flush(self):
+            return None
+
+        async def commit(self):
+            return None
+
+        async def rollback(self):
+            return None
+
+    session = RecoverySession()
+    recovered = await worker_service.recover_stuck_ingestion_jobs(
+        session,  # type: ignore[arg-type]
+        stuck_timeout_seconds=1,
+        max_attempts=3,
+        retry_base_seconds=1,
+        retry_max_seconds=10,
+    )
+
+    assert recovered == 1
+    assert job.status == IngestionStatus.failed
+    assert generation.status == GenerationStatus.failed
+    assert any(item.__class__.__name__ == "PurgeJob" for item in session.added)
+
+
+@pytest.mark.asyncio
 async def test_mark_ingestion_job_ready_sets_terminal_ready() -> None:
     job = DummyJob(status=IngestionStatus.processing, attempts=1)
     document = DummyDocument(status=IngestionStatus.processing)
@@ -193,6 +371,7 @@ async def test_mark_ingestion_job_retry_or_failed_requeues_when_attempts_remaini
     assert document.status == IngestionStatus.queued
     assert job.completed_at is None
     assert job.error == "temporary upstream timeout"
+    assert job.next_attempt_at is not None
 
 
 @pytest.mark.asyncio
@@ -215,6 +394,7 @@ async def test_mark_ingestion_job_retry_or_failed_marks_failed_at_max_attempts()
     assert document.status == IngestionStatus.failed
     assert job.completed_at is not None
     assert job.error == "permanent parse failure"
+    assert any(item.__class__.__name__ == "PurgeJob" for item in session.added)
 
 
 @pytest.mark.asyncio
@@ -287,6 +467,9 @@ async def test_process_next_ingestion_job_persists_chunks_before_ready_transitio
 
         async def refresh(self, item):
             self.refresh_calls.append(item)
+
+        async def scalar(self, _query):
+            return None
 
         def add(self, value):
             self.added.append(value)

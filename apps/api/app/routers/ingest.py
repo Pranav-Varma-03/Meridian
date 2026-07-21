@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.auth import get_current_user, require_document_reingest_permission
 from app.core.config import get_settings
 from app.core.database import get_db_session
-from app.models.entities import User
+from app.models.entities import ReingestionReason, User
 from app.schemas import (
     FORBIDDEN_RESPONSE,
     INTERNAL_ERROR_RESPONSE,
@@ -27,7 +27,7 @@ settings = get_settings()
 
 class IngestRequest(BaseModel):
     document_id: uuid.UUID
-    reason: str
+    reason: ReingestionReason
 
     model_config = ConfigDict(
         json_schema_extra={

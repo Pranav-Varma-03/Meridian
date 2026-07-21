@@ -87,6 +87,12 @@ async def default_ingestion_processor(
     claimed_job: ingestion_worker.ClaimedIngestionJob,
 ) -> None:
     """Parse document text, chunk it, and persist chunk metadata."""
+    if not await ingestion_worker.ensure_claimed_job_processable(
+        session, job_id=claimed_job.job.id
+    ):
+        raise ingestion_worker.NonRetryableIngestionError(
+            "Document was deleted or generation became terminal before ingestion"
+        )
     metadata = claimed_job.document.metadata_json or {}
     storage_path = metadata.get("storage_path")
     if not isinstance(storage_path, str) or not storage_path:
@@ -205,6 +211,12 @@ async def default_ingestion_processor(
     namespace = embeddings.build_pinecone_namespace(
         user_id=claimed_job.document.user_id
     )
+    if not await ingestion_worker.ensure_claimed_job_processable(
+        session, job_id=claimed_job.job.id
+    ):
+        raise ingestion_worker.NonRetryableIngestionError(
+            "Document was deleted or generation became terminal before vector upsert"
+        )
     await _upsert_embeddings_with_retry(
         namespace=namespace,
         embedded_chunks=embedded_chunks,
@@ -215,12 +227,17 @@ async def default_ingestion_processor(
         chunk_row.vector_id = embedded_lookup.get(chunk_row.id)
 
     if generation is not None:
-        await generations.activate_generation(
+        activated = await generations.activate_generation(
             session,
             document_id=claimed_job.document.id,
             generation_id=generation.id,
             vector_ids=[item.vector_id for item in embedded_chunks],
+            job_id=claimed_job.job.id,
         )
+        if not activated:
+            raise ingestion_worker.NonRetryableIngestionError(
+                "Generation activation fenced by document lifecycle"
+            )
 
     logger.info(
         "processing_ingestion_job",
@@ -262,12 +279,26 @@ async def run_worker_loop() -> None:
     try:
         while True:
             async with AsyncSessionLocal() as session:
+                recovered = await ingestion_worker.recover_stuck_ingestion_jobs(
+                    session,
+                    stuck_timeout_seconds=settings.ingestion_worker_stuck_timeout_seconds,
+                    max_attempts=settings.ingestion_worker_max_attempts,
+                    retry_base_seconds=settings.ingestion_retry_base_seconds,
+                    retry_max_seconds=settings.ingestion_retry_max_seconds,
+                )
+                if recovered:
+                    logger.warning(
+                        "ingestion_worker_recovered_stuck_jobs",
+                        extra={"count": recovered},
+                    )
                 processed = await ingestion_worker.process_next_ingestion_job(
                     session,
                     redis_client=redis_client,
                     queue_key=settings.ingestion_queue_key,
                     dequeue_timeout_seconds=settings.ingestion_worker_dequeue_timeout_seconds,
                     max_attempts=settings.ingestion_worker_max_attempts,
+                    retry_base_seconds=settings.ingestion_retry_base_seconds,
+                    retry_max_seconds=settings.ingestion_retry_max_seconds,
                     processor=default_ingestion_processor,
                 )
 

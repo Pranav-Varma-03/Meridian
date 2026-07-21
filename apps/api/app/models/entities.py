@@ -39,6 +39,14 @@ class GenerationStatus(enum.StrEnum):
     purged = "purged"
 
 
+class ReingestionReason(enum.StrEnum):
+    """Supported, user-visible reasons for an explicit document re-ingestion."""
+
+    manual_repair = "manual_repair"
+    model_migration = "model_migration"
+    chunking_change = "chunking_change"
+
+
 class PurgeJobStatus(enum.StrEnum):
     queued = "queued"
     running = "running"
@@ -288,10 +296,13 @@ class IngestionJob(Base):
         nullable=False,
     )
     attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
-    error: Mapped[str | None] = mapped_column(Text, nullable=True)
     started_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
+        DateTime(timezone=True), nullable=True, index=True
     )
+    next_attempt_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True
+    )
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
     completed_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
@@ -332,6 +343,9 @@ class PurgeJob(Base):
     idempotency_key: Mapped[str] = mapped_column(String(255), nullable=False)
     attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     next_attempt_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True
+    )
+    started_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True, index=True
     )
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)

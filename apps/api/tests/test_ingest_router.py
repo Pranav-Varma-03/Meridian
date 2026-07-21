@@ -109,6 +109,45 @@ async def test_queue_ingestion_happy_path(
 
 
 @pytest.mark.asyncio
+async def test_queue_ingestion_requires_reason(
+    api_client: AsyncClient,
+    override_auth_and_db,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def _create_job(_session, **kwargs):
+        raise AssertionError("service must not receive a request without a reason")
+
+    monkeypatch.setattr(document_service, "create_ingestion_job", _create_job)
+
+    response = await api_client.post(
+        "/api/v1/ingest",
+        json={"document_id": str(uuid.uuid4())},
+    )
+
+    assert response.status_code == 422
+    assert "reason" in response.text
+
+
+@pytest.mark.asyncio
+async def test_queue_ingestion_rejects_unknown_reason_at_request_boundary(
+    api_client: AsyncClient,
+    override_auth_and_db,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def _create_job(_session, **_kwargs):
+        raise AssertionError("service must not receive an invalid re-ingestion reason")
+
+    monkeypatch.setattr(document_service, "create_ingestion_job", _create_job)
+    response = await api_client.post(
+        "/api/v1/ingest",
+        json={"document_id": str(uuid.uuid4()), "reason": "string"},
+    )
+
+    assert response.status_code == 422
+    assert "manual_repair" in response.text
+
+
+@pytest.mark.asyncio
 async def test_queue_ingestion_returns_existing_active_job(
     api_client: AsyncClient,
     override_auth_and_db,

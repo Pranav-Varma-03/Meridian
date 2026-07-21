@@ -9,8 +9,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.entities import (
     Document,
     DocumentIngestionGeneration,
+    DocumentLifecycleStatus,
     GenerationStatus,
     GenerationVectorManifest,
+    IngestionJob,
     IngestionStatus,
     OutboxEvent,
     PurgeJob,
@@ -24,7 +26,8 @@ async def activate_generation(
     document_id: uuid.UUID,
     generation_id: uuid.UUID,
     vector_ids: list[str],
-) -> None:
+    job_id: uuid.UUID | None = None,
+) -> bool:
     """Make a fully-upserted generation retrievable and queue old-vector purge.
 
     This is deliberately performed only after Pinecone accepted the new vectors.
@@ -39,8 +42,52 @@ async def activate_generation(
         .where(DocumentIngestionGeneration.id == generation_id)
         .with_for_update()
     )
+    job = None
+    if job_id is not None:
+        job = await session.scalar(
+            select(IngestionJob).where(IngestionJob.id == job_id).with_for_update()
+        )
     if document is None or generation is None or generation.document_id != document.id:
         raise ValueError("Generation does not belong to document")
+    if (
+        document.lifecycle_status != DocumentLifecycleStatus.active
+        or generation.status != GenerationStatus.pending
+        or (
+            job is not None
+            and (
+                job.document_id != document.id
+                or job.generation_id != generation.id
+                or job.status != IngestionStatus.processing
+            )
+        )
+    ):
+        # The provider write may have completed before a concurrent delete became
+        # visible. Preserve a durable compensating purge instead of activating it.
+        if generation.status == GenerationStatus.pending:
+            generation.status = GenerationStatus.failed
+            generation.error = "Generation activation fenced by document lifecycle"
+        existing_purge = await session.scalar(
+            select(PurgeJob.id).where(
+                PurgeJob.idempotency_key == f"failed-generation-purge:{generation.id}"
+            )
+        )
+        if existing_purge is None and generation.status != GenerationStatus.active:
+            purge_job = PurgeJob(
+                document_id=document.id,
+                generation_id=generation.id,
+                status=PurgeJobStatus.queued,
+                idempotency_key=f"failed-generation-purge:{generation.id}",
+            )
+            session.add(purge_job)
+            await session.flush()
+            session.add(
+                OutboxEvent(
+                    topic="failed_document_generation_purge",
+                    payload_json={"purge_job_id": str(purge_job.id)},
+                )
+            )
+        await session.commit()
+        return False
 
     previous_generation_id = document.active_generation_id
     for vector_id in dict.fromkeys(vector_ids):
@@ -80,3 +127,4 @@ async def activate_generation(
     # is never displayed as permanently processing.
     document.status = IngestionStatus.ready
     await session.commit()
+    return True

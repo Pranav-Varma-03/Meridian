@@ -193,3 +193,40 @@ async def test_delete_embeddings_exposes_retryable_failure() -> None:
         )
 
     assert error.value.retryable is True
+
+
+@pytest.mark.asyncio
+async def test_delete_embeddings_by_metadata_filter_uses_owner_scope() -> None:
+    class FilterIndex:
+        def __init__(self) -> None:
+            self.calls = []
+
+        def delete(self, **kwargs) -> None:
+            self.calls.append(kwargs)
+
+    class FilterClient:
+        def __init__(self) -> None:
+            self.index = FilterIndex()
+
+        def Index(self, _name):  # noqa: N802
+            return self.index
+
+    client = FilterClient()
+    await embeddings.delete_embeddings_by_metadata_filter(
+        client,  # type: ignore[arg-type]
+        index_name="test-index",
+        namespace="user:owner",
+        metadata_filter={"document_id": "document-1", "generation": 2},
+        timeout_seconds=1,
+        max_attempts=1,
+    )
+
+    assert client.index.calls == [
+        {
+            "filter": {
+                "document_id": {"$eq": "document-1"},
+                "generation": {"$eq": 2},
+            },
+            "namespace": "user:owner",
+        }
+    ]

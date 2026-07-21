@@ -1,7 +1,6 @@
 import hashlib
 import uuid
 from dataclasses import dataclass
-from pathlib import Path
 
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
@@ -19,6 +18,7 @@ from app.models.entities import (
     OutboxEvent,
     PurgeJob,
     PurgeJobStatus,
+    ReingestionReason,
 )
 from app.services import document_processor
 
@@ -56,11 +56,7 @@ class IngestionJobWithDocument:
     created_new_job: bool = True
 
 
-REINGESTION_REASONS = {
-    "model_migration",
-    "chunking_change",
-    "manual_repair",
-}
+REINGESTION_REASONS = frozenset(reason.value for reason in ReingestionReason)
 
 
 async def create_uploaded_document(
@@ -73,17 +69,6 @@ async def create_uploaded_document(
     collection_id: uuid.UUID | None,
 ) -> UploadResult:
     file_hash = hashlib.sha256(file_bytes).hexdigest()
-
-    async def _delete_failed_duplicate(document: Document) -> None:
-        metadata = document.metadata_json or {}
-        storage_path = metadata.get("storage_path")
-        if isinstance(storage_path, str) and storage_path:
-            path = Path(storage_path)
-            if path.exists() and path.is_file():
-                path.unlink()
-
-        await session.delete(document)
-        await session.flush()
 
     async def _existing_upload_result() -> UploadResult | None:
         existing_document = await session.scalar(
@@ -123,8 +108,42 @@ async def create_uploaded_document(
             .order_by(IngestionJob.created_at.desc())
         )
         if latest_job is not None and latest_job.status == IngestionStatus.failed:
-            await _delete_failed_duplicate(existing_document)
-            return None
+            # Retain the failed generation and its purge job. A failed job may have
+            # partially upserted vectors, so deleting the document here would cascade
+            # away the only durable cleanup owner. The same content can safely get a
+            # fresh pending generation because vector IDs include its generation.
+            latest_generation = await session.scalar(
+                select(func.max(DocumentIngestionGeneration.generation_number)).where(
+                    DocumentIngestionGeneration.document_id == existing_document.id
+                )
+            )
+            generation = DocumentIngestionGeneration(
+                document_id=existing_document.id,
+                generation_number=int(latest_generation or 0) + 1,
+                status=GenerationStatus.pending,
+                reason="manual_repair",
+                configuration_json={},
+            )
+            session.add(generation)
+            await session.flush()
+            retry_job = IngestionJob(
+                document_id=existing_document.id,
+                generation_id=generation.id,
+                status=IngestionStatus.queued,
+                attempts=0,
+            )
+            session.add(retry_job)
+            if existing_document.active_generation_id is None:
+                existing_document.status = IngestionStatus.queued
+            await session.commit()
+            await session.refresh(existing_document)
+            await session.refresh(retry_job)
+            return UploadResult(
+                document=existing_document,
+                job=retry_job,
+                deduplicated=True,
+                enqueue_job=True,
+            )
 
         if latest_job is not None:
             return UploadResult(
@@ -325,12 +344,13 @@ async def delete_document(
     document_id: uuid.UUID,
 ) -> PurgeJob:
     document = await session.scalar(
-        select(Document).where(
+        select(Document)
+        .where(
             Document.user_id == user_id,
             Document.id == document_id,
             Document.lifecycle_status == DocumentLifecycleStatus.active,
-            Document.lifecycle_status == DocumentLifecycleStatus.active,
         )
+        .with_for_update()
     )
     if document is None:
         raise DocumentNotFoundError("Document not found")
@@ -358,17 +378,22 @@ async def create_ingestion_job(
     *,
     user_id: uuid.UUID,
     document_id: uuid.UUID,
-    reason: str,
+    reason: ReingestionReason | str,
 ) -> IngestionJobWithDocument:
     document = await session.scalar(
-        select(Document).where(
+        select(Document)
+        .where(
             Document.user_id == user_id,
             Document.id == document_id,
+            Document.lifecycle_status == DocumentLifecycleStatus.active,
         )
+        .with_for_update()
     )
     if document is None:
         raise DocumentNotFoundError("Document not found")
-    if reason not in REINGESTION_REASONS:
+    try:
+        normalized_reason = ReingestionReason(reason).value
+    except ValueError:
         raise ValueError("Unsupported re-ingestion reason")
 
     active_job = await session.scalar(
@@ -402,7 +427,7 @@ async def create_ingestion_job(
         document_id=document.id,
         generation_number=next_generation_number,
         status=GenerationStatus.pending,
-        reason=reason,
+        reason=normalized_reason,
         configuration_json={},
     )
     session.add(generation)

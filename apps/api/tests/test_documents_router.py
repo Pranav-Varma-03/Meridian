@@ -243,7 +243,7 @@ async def test_upload_document_failed_previous_ingestion_creates_fresh_job(
                 id=uuid.uuid4(),
                 status=types.SimpleNamespace(value="queued"),
             ),
-            deduplicated=False,
+            deduplicated=True,
             enqueue_job=True,
         )
 
@@ -259,7 +259,7 @@ async def test_upload_document_failed_previous_ingestion_creates_fresh_job(
     assert response.status_code == 202
     body = response.json()
     assert body["status"] == "queued"
-    assert body["deduplicated"] is False
+    assert body["deduplicated"] is True
     assert body["reused_existing_job"] is False
     assert len(captured_enqueues) == 1
 

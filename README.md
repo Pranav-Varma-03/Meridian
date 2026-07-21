@@ -330,10 +330,34 @@ Notes:
 - Uploaded/manual ingest jobs are pushed to Redis and consumed by the background worker
 - All document and ingestion operations are authenticated and scoped to the current user
 - Repeated manual ingest calls are idempotent while an active job already exists
-- Document deletion removes recorded Pinecone vector IDs from the document owner’s
-  namespace before deleting the database record. If Pinecone is temporarily
-  unavailable, deletion returns `503` and leaves the document intact so it can be
-  retried safely.
+- Document deletion is logical first: the document immediately disappears from
+  normal user APIs and a durable purge job deletes recorded vectors (plus legacy
+  document-filter matches) from the owner namespace and removes the raw file.
+  Pinecone cleanup may therefore complete asynchronously; retryable failures stay
+  visible to the purge worker rather than restoring the document to user reads.
+
+### Generation and purge lifecycle
+
+- A repeated identical upload is deduplication, not re-ingestion: it reuses the
+  existing user-owned document/job and does not mutate vectors.
+- `POST /api/v1/ingest` is the explicit, permission-gated re-ingestion path. It
+  creates a pending generation and leaves the active generation searchable until
+  the new vectors are fully upserted and activated.
+- A completed activation supersedes the prior generation and creates a durable
+  generation purge job. Failed pending generations also queue cleanup for any
+  partial vector manifest.
+- A repeated upload after a failed generation creates a fresh pending generation
+  on the same document identity. The failed generation and its purge job are
+  retained until cleanup completes, so a partial provider write never loses its
+  durable cleanup owner.
+- Ingestion checks document lifecycle state when claiming work, before vector
+  writes, and during activation. A concurrent deletion fences activation and
+  queues compensating cleanup for any vectors already written.
+- Ingestion retries use a Postgres-backed full-jitter exponential schedule.
+  Workers recover abandoned ingestion jobs after
+  `INGESTION_WORKER_STUCK_TIMEOUT_SECONDS`; purge retries use a durable
+  `next_attempt_at`, and purge workers recover abandoned running jobs after
+  `PURGE_WORKER_STUCK_TIMEOUT_SECONDS`.
 
 ### Current deduplication behavior
 
@@ -356,6 +380,7 @@ Open:
 Relevant manual guides in this repo:
 
 - `ManualTestGuide/Documents_Ingestion_Swagger_Manual_Guide.md`
+- `ManualTestGuide/Current_Vector_Lifecycle_Swagger_Manual_Guide.md`
 - `ManualTestGuide/CollectionTesting_Manual_Guide.md`
 - `ManualTestGuide/MILESTONE1_MANUAL_TESTS.md`
 

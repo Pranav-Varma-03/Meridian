@@ -11,12 +11,21 @@ from app.services import purge_worker
 
 settings = get_settings()
 logging.basicConfig(level=getattr(logging, settings.log_level, logging.INFO))
+logger = logging.getLogger(__name__)
 pinecone_client = Pinecone(api_key=settings.pinecone_api_key)
 
 
 async def run_worker_loop() -> None:
     while True:
         async with AsyncSessionLocal() as session:
+            recovered = await purge_worker.recover_stuck_purge_jobs(
+                session,
+                stuck_timeout_seconds=settings.purge_worker_stuck_timeout_seconds,
+            )
+            if recovered:
+                logger.warning(
+                    "purge_worker_recovered_stuck_jobs", extra={"count": recovered}
+                )
             job = await purge_worker.claim_next_purge_job(session)
             if job is not None:
                 await purge_worker.process_purge_job(

@@ -188,3 +188,42 @@ async def delete_embeddings(
                 if not retryable or attempt == max_attempts:
                     raise VectorDeletionError(retryable=retryable) from exc
                 await asyncio.sleep(0.1 * attempt)
+
+
+async def delete_embeddings_by_metadata_filter(
+    pinecone_client: Pinecone,
+    *,
+    index_name: str,
+    namespace: str,
+    metadata_filter: dict[str, str | int | float | bool],
+    timeout_seconds: float,
+    max_attempts: int,
+) -> None:
+    """Reconcile vectors using server-derived metadata after exact-ID deletion.
+
+    This is intentionally separate from ``delete_embeddings``: callers must make
+    an explicit decision about the scope of the metadata filter. A superseded
+    generation must include both document and generation; a document-wide filter
+    is only safe after the document has been logically hidden.
+    """
+    # Pinecone metadata filtering uses comparison operators. Normalising scalar
+    # caller values here keeps purge scope explicit and prevents an adapter caller
+    # from accidentally relying on SDK-specific implicit equality behaviour.
+    supported_filter = {key: {"$eq": value} for key, value in metadata_filter.items()}
+    index = pinecone_client.Index(index_name)
+    for attempt in range(1, max_attempts + 1):
+        try:
+            await asyncio.wait_for(
+                asyncio.to_thread(
+                    index.delete,
+                    filter=supported_filter,
+                    namespace=namespace,
+                ),
+                timeout=timeout_seconds,
+            )
+            return
+        except Exception as exc:
+            retryable = _is_retryable_vector_error(exc)
+            if not retryable or attempt == max_attempts:
+                raise VectorDeletionError(retryable=retryable) from exc
+            await asyncio.sleep(0.1 * attempt)

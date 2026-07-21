@@ -6,6 +6,20 @@ import pytest
 from app.services import ingestion_worker_runner
 
 
+@pytest.fixture(autouse=True)
+def _allow_test_processor_lifecycle(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Unit tests here isolate embedding behavior from DB lifecycle fencing."""
+
+    async def _processable(*_args, **_kwargs) -> bool:
+        return True
+
+    monkeypatch.setattr(
+        ingestion_worker_runner.ingestion_worker,
+        "ensure_claimed_job_processable",
+        _processable,
+    )
+
+
 @pytest.mark.asyncio
 async def test_embed_chunks_with_retry_succeeds_after_transient_failures(
     monkeypatch: pytest.MonkeyPatch,
