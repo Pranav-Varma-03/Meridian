@@ -132,7 +132,11 @@ CHAT_SOURCE_PER_DOCUMENT_LIMIT=2
 
 `POST /api/v1/chat` is a POST-SSE endpoint. Its successful stream emits zero or more
 `text` events, exactly one `sources` event, and one `done` event containing the
-conversation ID. If no active qualifying source exists, it returns a grounded
+conversation ID and effective retrieval scope/version. Callers can send
+`retrieval_scope` as `{ "mode": "all" }` or
+`{ "mode": "collections", "collection_ids": ["<uuid>"] }`; legacy
+`collection_ids` remains compatible. New and pre-existing conversations without a
+stored scope use all lifecycle-valid user documents, including unfiled documents. If no active qualifying source exists, it returns a grounded
 insufficiency answer with an empty `sources` array. Conversations are owner-scoped;
 only completed assistant answers are persisted. The generation prompt reserves output
 and safety capacity first, then reserves at least `CHAT_SOURCE_MIN_TOKENS` for
@@ -158,6 +162,14 @@ backfills a deterministic `sequence_number` from each message's existing
 per-conversation memory row lazily after a successful grounded response. The downgrade
 removes only the ordering and memory schema; use it only before application code that
 requires these fields is deployed. It does not alter existing transcript content.
+
+### 3.2.1) Conversation retrieval scope migration
+
+Apply Alembic revision `0006_conversation_retrieval_scopes` before deploying durable
+collection-scoped chat. It is additive: a conversation without a scope row behaves as
+synthetic `all`, version `0`. A submitted scope change is stored with the first affected
+user-message sequence for timeline display, while the latest scope is restored from one
+current-scope row.
 
 ### 3.3) Contextual chunking options
 

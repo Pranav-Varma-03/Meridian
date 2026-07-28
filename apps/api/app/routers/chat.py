@@ -3,6 +3,7 @@ import logging
 import uuid
 from collections.abc import AsyncIterator
 from datetime import datetime
+from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
@@ -13,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.auth import get_current_user
 from app.core.config import get_settings
 from app.core.database import get_db_session
-from app.models.entities import MessageRole, User
+from app.models.entities import MessageRole, RetrievalScopeMode, User
 from app.schemas import (
     INTERNAL_ERROR_RESPONSE,
     NOT_FOUND_RESPONSE,
@@ -33,10 +34,26 @@ settings = get_settings()
 logger = logging.getLogger(__name__)
 
 
+class RetrievalScopeRequest(BaseModel):
+    mode: Literal["all", "collections"]
+    collection_ids: list[uuid.UUID] = Field(default_factory=list, max_length=50)
+
+
+class RetrievalScopeResponse(BaseModel):
+    mode: Literal["all", "collections"]
+    collection_ids: list[str]
+    version: int
+
+
+class ConversationScopeEventResponse(RetrievalScopeResponse):
+    effective_from_sequence: int
+
+
 class ChatRequest(BaseModel):
     query: str = Field(min_length=1, max_length=12000)
     conversation_id: uuid.UUID | None = None
     collection_ids: list[uuid.UUID] | None = Field(default=None, max_length=50)
+    retrieval_scope: RetrievalScopeRequest | None = None
 
     model_config = ConfigDict(
         json_schema_extra={
@@ -53,6 +70,7 @@ class ConversationSummary(BaseModel):
     id: str
     title: str | None
     updated_at: datetime
+    retrieval_scope: RetrievalScopeResponse
 
 
 class ConversationListResponse(BaseModel):
@@ -72,6 +90,8 @@ class ConversationResponse(BaseModel):
     id: str
     title: str | None
     messages: list[ConversationMessage]
+    retrieval_scope: RetrievalScopeResponse
+    scope_events: list[ConversationScopeEventResponse]
 
 
 class MessageResponse(BaseModel):
@@ -90,6 +110,60 @@ def _message_response(message, *, citations: dict | None = None) -> Conversation
         citations=citations if citations is not None else message.citations or {},
         created_at=message.created_at,
     )
+
+
+def _scope_response(
+    scope: conversations.EffectiveRetrievalScope,
+) -> RetrievalScopeResponse:
+    return RetrievalScopeResponse(
+        mode=scope.mode.value,
+        collection_ids=[str(value) for value in scope.collection_ids],
+        version=scope.version,
+    )
+
+
+def _normalized_requested_scope(
+    payload: ChatRequest,
+) -> tuple[RetrievalScopeMode, tuple[uuid.UUID, ...]] | None:
+    has_new = "retrieval_scope" in payload.model_fields_set
+    has_legacy = "collection_ids" in payload.model_fields_set
+
+    def normalize(
+        mode: str, values: list[uuid.UUID]
+    ) -> tuple[RetrievalScopeMode, tuple[uuid.UUID, ...]]:
+        unique = tuple(dict.fromkeys(values))
+        if len(unique) != len(values):
+            raise HTTPException(status_code=422, detail="Collection IDs must be unique")
+        if mode == "all":
+            if unique:
+                raise HTTPException(
+                    status_code=422, detail="All scope cannot include collection IDs"
+                )
+            return RetrievalScopeMode.all, ()
+        if not unique:
+            raise HTTPException(
+                status_code=422, detail="Collection scope requires collection IDs"
+            )
+        return RetrievalScopeMode.collections, unique
+
+    new_scope = None
+    if has_new:
+        if payload.retrieval_scope is None:
+            raise HTTPException(
+                status_code=422, detail="retrieval_scope cannot be null"
+            )
+        new_scope = normalize(
+            payload.retrieval_scope.mode, payload.retrieval_scope.collection_ids
+        )
+    legacy_scope = None
+    if has_legacy:
+        legacy_ids = payload.collection_ids or []
+        legacy_scope = normalize("collections" if legacy_ids else "all", legacy_ids)
+    if new_scope is not None and legacy_scope is not None and new_scope != legacy_scope:
+        raise HTTPException(
+            status_code=422, detail="Conflicting retrieval scope fields"
+        )
+    return new_scope if new_scope is not None else legacy_scope
 
 
 @router.post(
@@ -127,6 +201,7 @@ async def chat(
     session: AsyncSession = Depends(get_db_session),
 ):
     """Retrieve lifecycle-valid PDF evidence and stream a grounded response."""
+    requested_scope = _normalized_requested_scope(payload)
     try:
         conversation = await conversations.create_or_get_conversation(
             session,
@@ -142,15 +217,20 @@ async def chat(
         memory = await conversations.get_memory(
             session, user_id=current_user.id, conversation_id=conversation.id
         )
-        await conversations.add_message(
+        _user_message, effective_scope = await conversations.submit_user_turn(
             session,
             conversation=conversation,
-            role=MessageRole.user,
+            user_id=current_user.id,
             content=payload.query.strip(),
+            requested_scope=requested_scope,
         )
         await session.commit()
     except conversations.ConversationNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except conversations.CollectionScopeAccessError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     pinecone_client = getattr(request.app.state, "pinecone", None)
     if pinecone_client is None:
@@ -188,7 +268,7 @@ async def chat(
                 pinecone_client=pinecone_client,
                 query=rewrite.query,
                 user_id=current_user.id,
-                collection_ids=payload.collection_ids,
+                collection_ids=list(effective_scope.collection_ids) or None,
                 openai_client=openai_client,
             )
         except retrieval.CollectionAccessError as exc:
@@ -233,6 +313,11 @@ async def chat(
     )
 
     async def generate() -> AsyncIterator[str]:
+        done_event = {
+            "type": "done",
+            "conversation_id": str(conversation.id),
+            "retrieval_scope": _scope_response(effective_scope).model_dump(),
+        }
         if rewrite.needs_clarification or not included_sources:
             answer = (
                 chat_generation.CLARIFICATION_ANSWER
@@ -249,7 +334,7 @@ async def chat(
             await session.commit()
             yield _sse({"type": "text", "content": answer})
             yield _sse({"type": "sources", "content": []})
-            yield _sse({"type": "done", "conversation_id": str(conversation.id)})
+            yield _sse(done_event)
             return
 
         answer_parts: list[str] = []
@@ -270,7 +355,7 @@ async def chat(
                     "message": "Chat generation is temporarily unavailable",
                 }
             )
-            yield _sse({"type": "done", "conversation_id": str(conversation.id)})
+            yield _sse(done_event)
             return
 
         answer = "".join(answer_parts).strip()
@@ -278,7 +363,7 @@ async def chat(
             yield _sse(
                 {"type": "error", "message": "Chat generation returned no answer"}
             )
-            yield _sse({"type": "done", "conversation_id": str(conversation.id)})
+            yield _sse(done_event)
             return
         await conversations.add_message(
             session,
@@ -295,7 +380,7 @@ async def chat(
         )
         await session.commit()
         yield _sse({"type": "sources", "content": normalized_sources})
-        yield _sse({"type": "done", "conversation_id": str(conversation.id)})
+        yield _sse(done_event)
 
     return StreamingResponse(
         generate(),
@@ -327,7 +412,14 @@ async def list_conversations(
     return ConversationListResponse(
         conversations=[
             ConversationSummary(
-                id=str(item.id), title=item.title, updated_at=item.updated_at
+                id=str(item.id),
+                title=item.title,
+                updated_at=item.updated_at,
+                retrieval_scope=_scope_response(
+                    await conversations.get_effective_retrieval_scope(
+                        session, conversation_id=item.id
+                    )
+                ),
             )
             for item in items
         ],
@@ -367,6 +459,16 @@ async def get_conversation(
                 citations=getattr(result, "display_citations", {}).get(message.id),
             )
             for message in result.messages
+        ],
+        retrieval_scope=_scope_response(result.retrieval_scope),
+        scope_events=[
+            ConversationScopeEventResponse(
+                mode=event.mode.value,
+                collection_ids=list(event.collection_ids),
+                version=event.scope_version,
+                effective_from_sequence=event.effective_from_sequence,
+            )
+            for event in result.scope_events
         ],
     )
 

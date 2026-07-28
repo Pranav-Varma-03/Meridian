@@ -3,6 +3,8 @@ from app.models.entities import (
     Collection,
     Conversation,
     ConversationMemory,
+    ConversationRetrievalScope,
+    ConversationScopeEvent,
     Document,
     DocumentChunk,
     DocumentIngestionGeneration,
@@ -16,6 +18,7 @@ from app.models.entities import (
     OutboxEvent,
     PurgeJob,
     PurgeJobStatus,
+    RetrievalScopeMode,
     User,
 )
 
@@ -34,8 +37,11 @@ __all__ = [
     "PurgeJobStatus",
     "OutboxEvent",
     "Conversation",
+    "ConversationRetrievalScope",
+    "ConversationScopeEvent",
     "ConversationMemory",
     "Message",
     "IngestionStatus",
     "MessageRole",
+    "RetrievalScopeMode",
 ]

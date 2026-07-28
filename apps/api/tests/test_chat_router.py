@@ -10,6 +10,7 @@ from app.core.auth import get_current_user
 from app.core.config import get_settings
 from app.core.database import get_db_session
 from app.main import app
+from app.models.entities import RetrievalScopeMode
 from app.routers import chat as chat_router
 from app.services import chat_generation, conversation_context, conversations, retrieval
 
@@ -61,6 +62,31 @@ def chat_dependencies(monkeypatch: pytest.MonkeyPatch):
             created_at=datetime.now(UTC),
         )
 
+    async def _submit(*_args, **kwargs):
+        added.append(
+            {
+                "role": types.SimpleNamespace(value="user"),
+                "content": kwargs["content"],
+            }
+        )
+        requested = kwargs["requested_scope"]
+        scope = (
+            conversations.EffectiveRetrievalScope(requested[0], requested[1], 1)
+            if requested is not None
+            else conversations.EffectiveRetrievalScope(RetrievalScopeMode.all, (), 0)
+        )
+        return (
+            types.SimpleNamespace(
+                id=uuid.uuid4(),
+                sequence_number=1,
+                role=types.SimpleNamespace(value="user"),
+                content=kwargs["content"],
+                citations={},
+                created_at=datetime.now(UTC),
+            ),
+            scope,
+        )
+
     app.dependency_overrides[get_current_user] = _current_user
     app.dependency_overrides[get_db_session] = _session
     app.state.pinecone = object()
@@ -68,6 +94,7 @@ def chat_dependencies(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(conversations, "load_recent_history", _history)
     monkeypatch.setattr(conversations, "get_memory", _memory)
     monkeypatch.setattr(conversations, "add_message", _add)
+    monkeypatch.setattr(conversations, "submit_user_turn", _submit)
     monkeypatch.setattr(conversation_context, "update_rolling_summary", _update_summary)
     yield user, conversation, added
     app.dependency_overrides.clear()
@@ -189,6 +216,49 @@ async def test_chat_empty_retrieval_returns_insufficiency_answer(
     assert response.status_code == 200
     assert chat_generation.INSUFFICIENT_CONTEXT_ANSWER in response.text
     assert '"content": []' in response.text
+
+
+@pytest.mark.asyncio
+async def test_chat_uses_explicit_collection_scope_and_reports_it(
+    api_client: AsyncClient,
+    chat_dependencies,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    collection_id = uuid.uuid4()
+
+    async def _retrieve(*_args, **kwargs):
+        assert kwargs["collection_ids"] == [collection_id]
+        return []
+
+    monkeypatch.setattr(retrieval, "retrieve_sources", _retrieve)
+    response = await api_client.post(
+        "/api/v1/chat",
+        json={
+            "query": "Question",
+            "retrieval_scope": {
+                "mode": "collections",
+                "collection_ids": [str(collection_id)],
+            },
+        },
+    )
+    assert response.status_code == 200
+    assert '"mode": "collections"' in response.text
+    assert '"version": 1' in response.text
+
+
+@pytest.mark.asyncio
+async def test_chat_rejects_conflicting_scope_fields(
+    api_client: AsyncClient, chat_dependencies
+) -> None:
+    response = await api_client.post(
+        "/api/v1/chat",
+        json={
+            "query": "Question",
+            "collection_ids": [str(uuid.uuid4())],
+            "retrieval_scope": {"mode": "all", "collection_ids": []},
+        },
+    )
+    assert response.status_code == 422
 
 
 @pytest.mark.asyncio
@@ -356,7 +426,15 @@ async def test_conversation_routes_are_owner_scoped(
                     ]
                 }
             },
+            retrieval_scope=conversations.EffectiveRetrievalScope(
+                RetrievalScopeMode.all, (), 0
+            ),
+            scope_events=[],
         )
+
+    async def _scope(_session, *, conversation_id):
+        assert conversation_id == conversation.id
+        return conversations.EffectiveRetrievalScope(RetrievalScopeMode.all, (), 0)
 
     async def _delete(_session, *, user_id, conversation_id):
         assert user_id == user.id
@@ -365,6 +443,7 @@ async def test_conversation_routes_are_owner_scoped(
     monkeypatch.setattr(conversations, "list_conversations", _list)
     monkeypatch.setattr(conversations, "get_conversation_with_messages", _detail)
     monkeypatch.setattr(conversations, "delete_conversation", _delete)
+    monkeypatch.setattr(conversations, "get_effective_retrieval_scope", _scope)
 
     listed = await api_client.get("/api/v1/chat/conversations")
     detailed = await api_client.get(f"/api/v1/chat/conversations/{conversation.id}")

@@ -62,6 +62,11 @@ class MessageRole(enum.StrEnum):
     system = "system"
 
 
+class RetrievalScopeMode(enum.StrEnum):
+    all = "all"
+    collections = "collections"
+
+
 class User(Base):
     __tablename__ = "users"
 
@@ -410,6 +415,68 @@ class Conversation(Base):
     memory: Mapped["ConversationMemory | None"] = relationship(
         back_populates="conversation", cascade="all, delete-orphan", uselist=False
     )
+    retrieval_scope: Mapped["ConversationRetrievalScope | None"] = relationship(
+        back_populates="conversation", cascade="all, delete-orphan", uselist=False
+    )
+    scope_events: Mapped[list["ConversationScopeEvent"]] = relationship(
+        back_populates="conversation", cascade="all, delete-orphan"
+    )
+
+
+class ConversationRetrievalScope(Base):
+    __tablename__ = "conversation_retrieval_scopes"
+
+    conversation_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("conversations.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    mode: Mapped[RetrievalScopeMode] = mapped_column(
+        Enum(RetrievalScopeMode, name="retrieval_scope_mode"), nullable=False
+    )
+    collection_ids: Mapped[list[str]] = mapped_column(
+        JSONB, default=list, nullable=False
+    )
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    conversation: Mapped[Conversation] = relationship(back_populates="retrieval_scope")
+
+
+class ConversationScopeEvent(Base):
+    __tablename__ = "conversation_scope_events"
+    __table_args__ = (
+        UniqueConstraint(
+            "conversation_id",
+            "effective_from_sequence",
+            name="uq_conversation_scope_event_sequence",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    conversation_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("conversations.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    effective_from_sequence: Mapped[int] = mapped_column(Integer, nullable=False)
+    mode: Mapped[RetrievalScopeMode] = mapped_column(
+        Enum(RetrievalScopeMode, name="retrieval_scope_mode"), nullable=False
+    )
+    collection_ids: Mapped[list[str]] = mapped_column(
+        JSONB, default=list, nullable=False
+    )
+    scope_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    conversation: Mapped[Conversation] = relationship(back_populates="scope_events")
 
 
 class ConversationMemory(Base):

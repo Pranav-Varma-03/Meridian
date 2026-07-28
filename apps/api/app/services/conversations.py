@@ -8,14 +8,18 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.entities import (
+    Collection,
     Conversation,
     ConversationMemory,
+    ConversationRetrievalScope,
+    ConversationScopeEvent,
     Document,
     DocumentIngestionGeneration,
     DocumentLifecycleStatus,
     GenerationStatus,
     Message,
     MessageRole,
+    RetrievalScopeMode,
 )
 
 
@@ -23,11 +27,31 @@ class ConversationNotFoundError(Exception):
     """Raised without revealing whether another user owns the conversation."""
 
 
+class CollectionScopeAccessError(Exception):
+    """Raised without disclosing collection ownership or existence."""
+
+
+@dataclass(frozen=True, slots=True)
+class EffectiveRetrievalScope:
+    mode: RetrievalScopeMode
+    collection_ids: tuple[uuid.UUID, ...]
+    version: int
+
+    def as_dict(self) -> dict:
+        return {
+            "mode": self.mode.value,
+            "collection_ids": [str(value) for value in self.collection_ids],
+            "version": self.version,
+        }
+
+
 @dataclass(slots=True)
 class ConversationWithMessages:
     conversation: Conversation
     messages: list[Message]
     display_citations: dict[uuid.UUID, dict] = field(default_factory=dict)
+    retrieval_scope: EffectiveRetrievalScope | None = None
+    scope_events: list[ConversationScopeEvent] = field(default_factory=list)
 
 
 async def get_conversation(
@@ -60,6 +84,119 @@ async def create_or_get_conversation(
     session.add(conversation)
     await session.flush()
     return conversation
+
+
+def _scope_from_row(
+    scope: ConversationRetrievalScope | None,
+) -> EffectiveRetrievalScope:
+    if scope is None:
+        return EffectiveRetrievalScope(RetrievalScopeMode.all, (), 0)
+    try:
+        collection_ids = tuple(uuid.UUID(value) for value in scope.collection_ids)
+    except (TypeError, ValueError):
+        collection_ids = ()
+    return EffectiveRetrievalScope(scope.mode, collection_ids, scope.version)
+
+
+async def get_effective_retrieval_scope(
+    session: AsyncSession, *, conversation_id: uuid.UUID
+) -> EffectiveRetrievalScope:
+    row = await session.get(ConversationRetrievalScope, conversation_id)
+    return _scope_from_row(row)
+
+
+async def _validate_scope_collections(
+    session: AsyncSession, *, user_id: uuid.UUID, collection_ids: tuple[uuid.UUID, ...]
+) -> None:
+    if not collection_ids:
+        return
+    result = await session.scalars(
+        select(Collection.id).where(
+            Collection.user_id == user_id, Collection.id.in_(collection_ids)
+        )
+    )
+    if set(result.all()) != set(collection_ids):
+        raise CollectionScopeAccessError("Collection not found")
+
+
+async def submit_user_turn(
+    session: AsyncSession,
+    *,
+    conversation: Conversation,
+    user_id: uuid.UUID,
+    content: str,
+    requested_scope: tuple[RetrievalScopeMode, tuple[uuid.UUID, ...]] | None,
+) -> tuple[Message, EffectiveRetrievalScope]:
+    """Persist a user turn and its changed scope as one durable transaction unit."""
+    locked = await session.scalar(
+        select(Conversation)
+        .where(Conversation.id == conversation.id, Conversation.user_id == user_id)
+        .with_for_update()
+    )
+    if locked is None:
+        raise ConversationNotFoundError("Conversation not found")
+    scope_row = await session.scalar(
+        select(ConversationRetrievalScope)
+        .where(ConversationRetrievalScope.conversation_id == locked.id)
+        .with_for_update()
+    )
+    current = _scope_from_row(scope_row)
+    target = current
+    if requested_scope is not None:
+        mode, collection_ids = requested_scope
+        if mode == RetrievalScopeMode.collections and not collection_ids:
+            raise ValueError("A collection scope requires at least one collection")
+        await _validate_scope_collections(
+            session, user_id=user_id, collection_ids=collection_ids
+        )
+        target = EffectiveRetrievalScope(mode, collection_ids, current.version)
+
+    latest_sequence = await session.scalar(
+        select(func.max(Message.sequence_number)).where(
+            Message.conversation_id == locked.id
+        )
+    )
+    message = Message(
+        conversation_id=locked.id,
+        sequence_number=int(latest_sequence or 0) + 1,
+        role=MessageRole.user,
+        content=content,
+        citations={},
+    )
+    session.add(message)
+    locked.updated_at = datetime.now(UTC)
+    changed = (
+        target.mode != current.mode or target.collection_ids != current.collection_ids
+    )
+    if changed:
+        next_version = current.version + 1
+        if scope_row is None:
+            scope_row = ConversationRetrievalScope(
+                conversation_id=locked.id,
+                mode=target.mode,
+                collection_ids=[str(value) for value in target.collection_ids],
+                version=next_version,
+            )
+            session.add(scope_row)
+        else:
+            scope_row.mode = target.mode
+            scope_row.collection_ids = [str(value) for value in target.collection_ids]
+            scope_row.version = next_version
+            scope_row.updated_at = datetime.now(UTC)
+        target = EffectiveRetrievalScope(
+            target.mode, target.collection_ids, next_version
+        )
+        session.add(
+            ConversationScopeEvent(
+                conversation_id=locked.id,
+                effective_from_sequence=message.sequence_number,
+                mode=target.mode,
+                collection_ids=[str(value) for value in target.collection_ids],
+                scope_version=target.version,
+            )
+        )
+    await session.flush()
+    return message, target
 
 
 async def add_message(
@@ -152,6 +289,11 @@ async def get_conversation_with_messages(
         .order_by(Message.sequence_number.asc())
     )
     message_list = list(messages.all())
+    scope_events = await session.scalars(
+        select(ConversationScopeEvent)
+        .where(ConversationScopeEvent.conversation_id == conversation.id)
+        .order_by(ConversationScopeEvent.effective_from_sequence.asc())
+    )
     return ConversationWithMessages(
         conversation=conversation,
         messages=message_list,
@@ -160,6 +302,10 @@ async def get_conversation_with_messages(
             user_id=user_id,
             messages=message_list,
         ),
+        retrieval_scope=await get_effective_retrieval_scope(
+            session, conversation_id=conversation.id
+        ),
+        scope_events=list(scope_events.all()),
     )
 
 

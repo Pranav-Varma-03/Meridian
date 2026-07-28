@@ -42,6 +42,20 @@ export interface Conversation {
   updatedAt: string;
 }
 
+export type RetrievalScope =
+  | { mode: "all"; collectionIds: []; version: number }
+  | { mode: "collections"; collectionIds: string[]; version: number };
+
+export type ConversationScopeEvent = RetrievalScope & {
+  effectiveFromSequence: number;
+};
+
+export interface ChatDoneEvent {
+  type: "done";
+  conversationId: string;
+  retrievalScope: RetrievalScope;
+}
+
 export interface ApiError {
   error: string;
   message: string;
