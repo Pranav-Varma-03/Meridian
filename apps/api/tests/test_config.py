@@ -21,6 +21,7 @@ def _set_required_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("INGESTION_WORKER_MAX_ATTEMPTS", "3")
     monkeypatch.setenv("INGESTION_WORKER_IDLE_SLEEP_SECONDS", "1.0")
     monkeypatch.setenv("OPENAI_API_KEY", "test-openai-key")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-openrouter-key")
     monkeypatch.setenv("EMBEDDING_PROVIDER", "pinecone")
     monkeypatch.setenv("EMBEDDING_MODEL", "llama-text-embed-v2")
     monkeypatch.setenv("EMBEDDING_INPUT_TYPE", "passage")
@@ -48,6 +49,17 @@ def test_settings_load_with_required_env(monkeypatch: pytest.MonkeyPatch) -> Non
         "http://localhost:3000",
         "https://app.example.com",
     ]
+    assert settings.chat_model == "openrouter/free"
+    assert settings.openrouter_base_url == "https://openrouter.ai/api/v1"
+
+
+def test_settings_normalizes_openrouter_base_url(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_required_env(monkeypatch)
+    monkeypatch.setenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1/")
+
+    assert Settings().openrouter_base_url == "https://openrouter.ai/api/v1"
 
 
 def test_settings_reject_non_supabase_ssl_mode(monkeypatch: pytest.MonkeyPatch) -> None:

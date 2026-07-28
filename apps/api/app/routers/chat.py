@@ -1,65 +1,71 @@
 import json
+import logging
+import uuid
+from collections.abc import AsyncIterator
+from datetime import datetime
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, ConfigDict
+from openai import AsyncOpenAI
+from pydantic import BaseModel, ConfigDict, Field
+from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.auth import get_current_user
+from app.core.config import get_settings
+from app.core.database import get_db_session
+from app.models.entities import MessageRole, User
 from app.schemas import (
     INTERNAL_ERROR_RESPONSE,
     NOT_FOUND_RESPONSE,
+    SERVICE_UNAVAILABLE_RESPONSE,
     UNAUTHORIZED_RESPONSE,
     VALIDATION_ERROR_RESPONSE,
 )
+from app.services import (
+    chat_generation,
+    conversation_context,
+    conversations,
+    retrieval,
+)
 
 router = APIRouter()
+settings = get_settings()
+logger = logging.getLogger(__name__)
 
 
 class ChatRequest(BaseModel):
-    query: str
-    conversation_id: str | None = None
-    collection_ids: list[str] | None = None  # If None, search all collections
+    query: str = Field(min_length=1, max_length=12000)
+    conversation_id: uuid.UUID | None = None
+    collection_ids: list[uuid.UUID] | None = Field(default=None, max_length=50)
 
     model_config = ConfigDict(
         json_schema_extra={
             "example": {
                 "query": "Summarize the onboarding policy",
-                "conversation_id": None,
+                "conversation_id": "152dc37c-de00-47d0-a47c-3a2f7804cbb1",
                 "collection_ids": ["7ecff269-f648-4601-8d97-1c6f0fabf906"],
             }
         }
     )
 
 
-class ChatResponse(BaseModel):
-    answer: str
-    sources: list[dict]
-    conversation_id: str
-
-
 class ConversationSummary(BaseModel):
     id: str
     title: str | None
-    updated_at: str
+    updated_at: datetime
 
 
 class ConversationListResponse(BaseModel):
     conversations: list[ConversationSummary]
     total: int
 
-    model_config = ConfigDict(
-        json_schema_extra={
-            "example": {
-                "conversations": [],
-                "total": 0,
-            }
-        }
-    )
-
 
 class ConversationMessage(BaseModel):
+    id: str
     role: str
     content: str
-    created_at: str
+    citations: dict
+    created_at: datetime
 
 
 class ConversationResponse(BaseModel):
@@ -71,18 +77,28 @@ class ConversationResponse(BaseModel):
 class MessageResponse(BaseModel):
     message: str
 
-    model_config = ConfigDict(
-        json_schema_extra={"example": {"message": "Conversation deleted"}}
+
+def _sse(payload: dict) -> str:
+    return f"data: {json.dumps(payload)}\n\n"
+
+
+def _message_response(message, *, citations: dict | None = None) -> ConversationMessage:
+    return ConversationMessage(
+        id=str(message.id),
+        role=message.role.value,
+        content=message.content,
+        citations=citations if citations is not None else message.citations or {},
+        created_at=message.created_at,
     )
 
 
 @router.post(
     "",
     status_code=200,
-    summary="Stream chat response",
+    summary="Stream grounded chat response",
     description=(
-        "Streams RAG responses using Server-Sent Events (SSE). "
-        "Event payloads include `text`, `sources`, and `done` chunks."
+        "Authenticated POST-SSE chat. The stream emits zero or more `text` events, "
+        "one `sources` event, and a terminal `done` event."
     ),
     responses={
         200: {
@@ -91,52 +107,200 @@ class MessageResponse(BaseModel):
                 "text/event-stream": {
                     "example": (
                         'data: {"type":"text","content":"Hello"}\\n\\n'
-                        'data: {"type":"done"}\\n\\n'
+                        'data: {"type":"sources","content":[]}\\n\\n'
+                        'data: {"type":"done","conversation_id":"..."}\\n\\n'
                     )
                 }
             },
         },
         401: UNAUTHORIZED_RESPONSE,
+        404: NOT_FOUND_RESPONSE,
         422: VALIDATION_ERROR_RESPONSE,
+        503: SERVICE_UNAVAILABLE_RESPONSE,
         500: INTERNAL_ERROR_RESPONSE,
     },
 )
-async def chat(request: ChatRequest):
-    """
-    RAG chat endpoint with streaming response.
+async def chat(
+    request: Request,
+    payload: ChatRequest,
+    current_user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Retrieve lifecycle-valid PDF evidence and stream a grounded response."""
+    try:
+        conversation = await conversations.create_or_get_conversation(
+            session,
+            user_id=current_user.id,
+            conversation_id=payload.conversation_id,
+            initial_query=payload.query,
+        )
+        history = await conversations.load_recent_history(
+            session,
+            conversation_id=conversation.id,
+            limit=settings.chat_history_max_messages,
+        )
+        memory = await conversations.get_memory(
+            session, user_id=current_user.id, conversation_id=conversation.id
+        )
+        await conversations.add_message(
+            session,
+            conversation=conversation,
+            role=MessageRole.user,
+            content=payload.query.strip(),
+        )
+        await session.commit()
+    except conversations.ConversationNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
-    Flow:
-    1. Load conversation history (if conversation_id provided)
-    2. Route query to relevant collections
-    3. Retrieve relevant chunks
-    4. Generate streaming response
-    5. Save conversation turn
-    """
+    pinecone_client = getattr(request.app.state, "pinecone", None)
+    if pinecone_client is None:
+        raise HTTPException(
+            status_code=503, detail="Retrieval is temporarily unavailable"
+        )
+    # OpenAI is retained only for optional OpenAI embeddings during retrieval.
+    openai_client = (
+        AsyncOpenAI(api_key=settings.openai_api_key)
+        if settings.openai_api_key
+        else None
+    )
+    openrouter_client = (
+        AsyncOpenAI(
+            api_key=settings.openrouter_api_key,
+            base_url=settings.openrouter_base_url,
+        )
+        if settings.openrouter_api_key
+        else None
+    )
+    rewrite = await chat_generation.rewrite_retrieval_query(
+        client=openrouter_client,
+        settings=settings,
+        query=payload.query,
+        history=history,
+        summary=memory.summary_json if memory is not None else None,
+    )
+    if rewrite.needs_clarification:
+        sources = []
+    else:
+        try:
+            sources = await retrieval.retrieve_sources(
+                session,
+                settings=settings,
+                pinecone_client=pinecone_client,
+                query=rewrite.query,
+                user_id=current_user.id,
+                collection_ids=payload.collection_ids,
+                openai_client=openai_client,
+            )
+        except retrieval.CollectionAccessError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except (retrieval.RetrievalUnavailableError, ValueError) as exc:
+            raise HTTPException(
+                status_code=503, detail="Retrieval is temporarily unavailable"
+            ) from exc
 
-    async def generate():
-        # TODO: Implement full RAG pipeline
-        # For now, return a placeholder streaming response
-        chunks = [
-            {"type": "text", "content": "This is a "},
-            {"type": "text", "content": "streaming "},
-            {"type": "text", "content": "response "},
-            {"type": "text", "content": "placeholder."},
-            {
-                "type": "sources",
-                "content": [],  # Sources will go here
-            },
-            {"type": "done"},
-        ]
-        for chunk in chunks:
-            yield f"data: {json.dumps(chunk)}\n\n"
+    assembly = (
+        chat_generation.build_messages(
+            query=payload.query,
+            history=history,
+            summary=memory.summary_json if memory is not None else None,
+            sources=sources,
+            settings=settings,
+        )
+        if sources
+        else None
+    )
+    included_sources = assembly.included_sources if assembly is not None else []
+    normalized_sources = [source.citation() for source in included_sources]
+    logger.info(
+        "chat_context_selected",
+        extra={
+            "request_id": getattr(request.state, "request_id", "unknown"),
+            "conversation_id": str(conversation.id),
+            "retrieved_source_count": len(sources),
+            "included_source_count": len(included_sources),
+            "included_history_count": len(assembly.included_history)
+            if assembly is not None
+            else 0,
+            "included_summary": bool(assembly and assembly.included_summary),
+            "input_budget_tokens": assembly.input_budget_tokens
+            if assembly is not None
+            else 0,
+            "source_tokens": assembly.source_tokens if assembly is not None else 0,
+            "history_tokens": assembly.history_tokens if assembly is not None else 0,
+            "summary_tokens": assembly.summary_tokens if assembly is not None else 0,
+            "rewrite_requested_clarification": rewrite.needs_clarification,
+        },
+    )
+
+    async def generate() -> AsyncIterator[str]:
+        if rewrite.needs_clarification or not included_sources:
+            answer = (
+                chat_generation.CLARIFICATION_ANSWER
+                if rewrite.needs_clarification
+                else chat_generation.INSUFFICIENT_CONTEXT_ANSWER
+            )
+            await conversations.add_message(
+                session,
+                conversation=conversation,
+                role=MessageRole.assistant,
+                content=answer,
+                citations={"sources": []},
+            )
+            await session.commit()
+            yield _sse({"type": "text", "content": answer})
+            yield _sse({"type": "sources", "content": []})
+            yield _sse({"type": "done", "conversation_id": str(conversation.id)})
+            return
+
+        answer_parts: list[str] = []
+        try:
+            async for text in chat_generation.stream_grounded_answer(
+                client=openrouter_client,
+                settings=settings,
+                prompt_messages=assembly.messages,
+            ):
+                answer_parts.append(text)
+                yield _sse({"type": "text", "content": text})
+        except chat_generation.GenerationUnavailableError:
+            # SSE has already started. Keep the failure safe and do not persist a
+            # partial assistant message as durable conversation history.
+            yield _sse(
+                {
+                    "type": "error",
+                    "message": "Chat generation is temporarily unavailable",
+                }
+            )
+            yield _sse({"type": "done", "conversation_id": str(conversation.id)})
+            return
+
+        answer = "".join(answer_parts).strip()
+        if not answer:
+            yield _sse(
+                {"type": "error", "message": "Chat generation returned no answer"}
+            )
+            yield _sse({"type": "done", "conversation_id": str(conversation.id)})
+            return
+        await conversations.add_message(
+            session,
+            conversation=conversation,
+            role=MessageRole.assistant,
+            content=answer,
+            citations={"sources": normalized_sources},
+        )
+        await conversation_context.update_rolling_summary(
+            session,
+            conversation=conversation,
+            client=openrouter_client,
+            settings=settings,
+        )
+        await session.commit()
+        yield _sse({"type": "sources", "content": normalized_sources})
+        yield _sse({"type": "done", "conversation_id": str(conversation.id)})
 
     return StreamingResponse(
         generate(),
         media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-        },
+        headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
     )
 
 
@@ -145,17 +309,30 @@ async def chat(request: ChatRequest):
     response_model=ConversationListResponse,
     status_code=200,
     summary="List conversations",
-    description="Returns paginated conversation history for the authenticated user.",
     responses={
         401: UNAUTHORIZED_RESPONSE,
         422: VALIDATION_ERROR_RESPONSE,
         500: INTERNAL_ERROR_RESPONSE,
     },
 )
-async def list_conversations(limit: int = 20, offset: int = 0):
-    """List conversation history for the authenticated user."""
-    # TODO: Fetch from Redis/DB
-    return ConversationListResponse(conversations=[], total=0)
+async def list_conversations(
+    limit: int = Query(default=20, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+    current_user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_db_session),
+) -> ConversationListResponse:
+    items, total = await conversations.list_conversations(
+        session, user_id=current_user.id, limit=limit, offset=offset
+    )
+    return ConversationListResponse(
+        conversations=[
+            ConversationSummary(
+                id=str(item.id), title=item.title, updated_at=item.updated_at
+            )
+            for item in items
+        ],
+        total=total,
+    )
 
 
 @router.get(
@@ -163,7 +340,6 @@ async def list_conversations(limit: int = 20, offset: int = 0):
     response_model=ConversationResponse,
     status_code=200,
     summary="Get conversation",
-    description="Returns full message history for a conversation.",
     responses={
         401: UNAUTHORIZED_RESPONSE,
         404: NOT_FOUND_RESPONSE,
@@ -171,10 +347,28 @@ async def list_conversations(limit: int = 20, offset: int = 0):
         500: INTERNAL_ERROR_RESPONSE,
     },
 )
-async def get_conversation(conversation_id: str):
-    """Get full conversation history."""
-    # TODO: Fetch from Redis/DB
-    raise HTTPException(status_code=404, detail="Conversation not found")
+async def get_conversation(
+    conversation_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_db_session),
+) -> ConversationResponse:
+    try:
+        result = await conversations.get_conversation_with_messages(
+            session, user_id=current_user.id, conversation_id=conversation_id
+        )
+    except conversations.ConversationNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return ConversationResponse(
+        id=str(result.conversation.id),
+        title=result.conversation.title,
+        messages=[
+            _message_response(
+                message,
+                citations=getattr(result, "display_citations", {}).get(message.id),
+            )
+            for message in result.messages
+        ],
+    )
 
 
 @router.delete(
@@ -182,7 +376,6 @@ async def get_conversation(conversation_id: str):
     response_model=MessageResponse,
     status_code=200,
     summary="Delete conversation",
-    description="Deletes one conversation and its messages.",
     responses={
         401: UNAUTHORIZED_RESPONSE,
         404: NOT_FOUND_RESPONSE,
@@ -190,7 +383,15 @@ async def get_conversation(conversation_id: str):
         500: INTERNAL_ERROR_RESPONSE,
     },
 )
-async def delete_conversation(conversation_id: str):
-    """Delete a conversation."""
-    # TODO: Delete from Redis/DB
+async def delete_conversation(
+    conversation_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_db_session),
+) -> MessageResponse:
+    try:
+        await conversations.delete_conversation(
+            session, user_id=current_user.id, conversation_id=conversation_id
+        )
+    except conversations.ConversationNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
     return MessageResponse(message="Conversation deleted")

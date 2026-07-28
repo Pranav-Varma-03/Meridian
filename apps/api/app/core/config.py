@@ -32,6 +32,32 @@ class Settings(BaseSettings):
     # OpenAI
     openai_api_key: str | None = None
 
+    # OpenRouter powers grounded chat generation. OpenAI remains available for the
+    # optional OpenAI embedding and contextual chunking integrations below.
+    openrouter_api_key: str | None = None
+    openrouter_base_url: str = "https://openrouter.ai/api/v1"
+
+    # The API validates generation-provider availability when a chat request is made
+    # so deployments that only run ingestion are not blocked at startup.
+    chat_model: str = "openrouter/free"
+    chat_temperature: float = Field(default=0.2, ge=0, le=2)
+    chat_max_output_tokens: int = Field(default=800, gt=0, le=8192)
+    chat_context_window_tokens: int = Field(default=16000, gt=1024, le=200000)
+    chat_context_budget_tokens: int = Field(default=6000, gt=256, le=100000)
+    chat_safety_reserve_tokens: int = Field(default=512, gt=0, le=8192)
+    chat_summary_max_tokens: int = Field(default=1000, ge=0, le=16000)
+    chat_history_max_tokens: int = Field(default=1800, ge=0, le=32000)
+    chat_source_min_tokens: int = Field(default=1200, gt=0, le=32000)
+    chat_source_max_tokens: int = Field(default=4000, gt=0, le=64000)
+    chat_source_per_document_limit: int = Field(default=2, gt=0, le=10)
+    chat_retrieval_top_k: int = Field(default=12, gt=0, le=100)
+    chat_retrieval_overfetch: int = Field(default=3, gt=0, le=10)
+    chat_retrieval_max_sources: int = Field(default=6, gt=0, le=30)
+    chat_retrieval_score_threshold: float = Field(default=0.2, ge=-1, le=1)
+    chat_history_max_messages: int = Field(default=8, gt=0, le=50)
+    chat_summary_model: str | None = None
+    chat_rewrite_model: str | None = None
+
     # Embeddings (provider-agnostic)
     embedding_provider: str
     embedding_model: str
@@ -178,6 +204,22 @@ class Settings(BaseSettings):
             raise ValueError("EMBEDDING_MODEL must be a non-empty string")
         return normalized
 
+    @field_validator("chat_model")
+    @classmethod
+    def validate_chat_model(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("CHAT_MODEL must be a non-empty string")
+        return normalized
+
+    @field_validator("openrouter_base_url")
+    @classmethod
+    def validate_openrouter_base_url(cls, value: str) -> str:
+        normalized = value.strip().rstrip("/")
+        if not normalized.startswith(("https://", "http://")):
+            raise ValueError("OPENROUTER_BASE_URL must be an HTTP(S) URL")
+        return normalized
+
     @field_validator("embedding_input_type")
     @classmethod
     def validate_embedding_input_type(cls, value: str | None) -> str | None:
@@ -224,6 +266,25 @@ class Settings(BaseSettings):
         ):
             raise ValueError(
                 "OpenAI contextual chunking requires CONTEXTUAL_CHUNKING_MODEL and OPENAI_API_KEY"
+            )
+
+        available_input_tokens = min(
+            self.chat_context_budget_tokens,
+            self.chat_context_window_tokens
+            - self.chat_max_output_tokens
+            - self.chat_safety_reserve_tokens,
+        )
+        if available_input_tokens <= 0:
+            raise ValueError(
+                "Chat context window must leave positive input capacity after output and safety reserves"
+            )
+        if self.chat_source_min_tokens > self.chat_source_max_tokens:
+            raise ValueError(
+                "CHAT_SOURCE_MIN_TOKENS must not exceed CHAT_SOURCE_MAX_TOKENS"
+            )
+        if self.chat_source_min_tokens > available_input_tokens:
+            raise ValueError(
+                "CHAT_SOURCE_MIN_TOKENS exceeds available chat input capacity"
             )
         return self
 

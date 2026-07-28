@@ -2,6 +2,7 @@ from app.models.base import Base
 from app.models.entities import (
     Collection,
     Conversation,
+    ConversationMemory,
     Document,
     DocumentChunk,
     DocumentIngestionGeneration,
@@ -33,6 +34,7 @@ __all__ = [
     "PurgeJobStatus",
     "OutboxEvent",
     "Conversation",
+    "ConversationMemory",
     "Message",
     "IngestionStatus",
     "MessageRole",

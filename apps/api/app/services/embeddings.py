@@ -121,6 +121,53 @@ async def embed_chunks(
     return embedded
 
 
+async def embed_query(
+    *,
+    provider: str,
+    model: str,
+    query: str,
+    pinecone_client: Pinecone | None = None,
+    openai_client: AsyncOpenAI | None = None,
+) -> list[float]:
+    """Embed one user query using the provider's retrieval-query mode."""
+    normalized_query = query.strip()
+    if not normalized_query:
+        raise ValueError("Query must not be empty")
+
+    if provider == "pinecone":
+        if pinecone_client is None:
+            raise ValueError("Pinecone client is required for pinecone embeddings")
+        response = pinecone_client.inference.embed(
+            model=model,
+            inputs=[{"text": normalized_query}],
+            parameters={"input_type": "query"},
+        )
+        items = getattr(response, "data", None) or (
+            response.get("data", []) if isinstance(response, dict) else []
+        )
+        if len(items) != 1:
+            raise ValueError("Query embedding response must contain one vector")
+        item = items[0]
+        values = (
+            item.get("values", [])
+            if isinstance(item, dict)
+            else getattr(item, "values", [])
+        )
+        return list(values)
+
+    if provider == "openai":
+        if openai_client is None:
+            raise ValueError("OpenAI client is required for openai embeddings")
+        response = await openai_client.embeddings.create(
+            model=model, input=normalized_query
+        )
+        if len(response.data) != 1:
+            raise ValueError("Query embedding response must contain one vector")
+        return list(response.data[0].embedding)
+
+    raise ValueError(f"Unsupported embedding provider: {provider}")
+
+
 def upsert_embeddings(
     pinecone_client: Pinecone,
     *,

@@ -10,6 +10,7 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
+    UniqueConstraint,
     func,
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID
@@ -406,10 +407,42 @@ class Conversation(Base):
     messages: Mapped[list["Message"]] = relationship(
         back_populates="conversation", cascade="all, delete-orphan"
     )
+    memory: Mapped["ConversationMemory | None"] = relationship(
+        back_populates="conversation", cascade="all, delete-orphan", uselist=False
+    )
+
+
+class ConversationMemory(Base):
+    __tablename__ = "conversation_memories"
+
+    conversation_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("conversations.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    summary_json: Mapped[dict] = mapped_column(
+        "summary", JSONB, default=dict, nullable=False
+    )
+    summary_version: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    summarized_through_sequence: Mapped[int] = mapped_column(
+        Integer, default=0, nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    conversation: Mapped[Conversation] = relationship(back_populates="memory")
 
 
 class Message(Base):
     __tablename__ = "messages"
+    __table_args__ = (
+        UniqueConstraint(
+            "conversation_id",
+            "sequence_number",
+            name="uq_messages_conversation_sequence",
+        ),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
@@ -420,6 +453,7 @@ class Message(Base):
         nullable=False,
         index=True,
     )
+    sequence_number: Mapped[int] = mapped_column(Integer, nullable=False)
     role: Mapped[MessageRole] = mapped_column(
         Enum(MessageRole, name="message_role"), nullable=False
     )

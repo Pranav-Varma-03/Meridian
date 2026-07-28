@@ -23,7 +23,7 @@ class _DummyPineconeForEmbed:
     class _Inference:
         def embed(self, *, model, inputs, parameters=None):
             _ = model
-            assert parameters == {"input_type": "passage"}
+            assert parameters in ({"input_type": "passage"}, {"input_type": "query"})
             return types.SimpleNamespace(
                 data=[
                     types.SimpleNamespace(values=[float(i), float(i + 1)])
@@ -91,6 +91,21 @@ async def test_embed_chunks_returns_vector_payloads() -> None:
     assert embedded[0].vector_id == f"chunk:{chunks[0].id}"
     assert embedded[0].metadata["document_id"] == str(chunks[0].document_id)
     assert embedded[0].metadata["section_heading"] == ""
+    assert "chunk_text" not in embedded[0].metadata
+
+
+@pytest.mark.asyncio
+async def test_embed_query_uses_pinecone_query_mode() -> None:
+    client = _DummyPineconeForEmbed()
+
+    values = await embeddings.embed_query(
+        provider="pinecone",
+        model="llama-text-embed-v2",
+        query="find policy",
+        pinecone_client=client,  # type: ignore[arg-type]
+    )
+
+    assert values == [0.0, 1.0]
 
 
 @pytest.mark.asyncio

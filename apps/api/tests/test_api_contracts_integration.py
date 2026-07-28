@@ -179,9 +179,8 @@ async def test_documents_upload_rejects_unsupported_type(
 async def test_chat_sse_contract_shape(api_client: AsyncClient) -> None:
     response = await api_client.post("/api/v1/chat", json={"query": "hello"})
 
-    assert response.status_code == 200
-    assert response.headers["content-type"].startswith("text/event-stream")
-    assert '"type": "done"' in response.text
+    assert response.status_code == 401
+    assert response.json()["error"]["code"] == "HTTP_ERROR"
 
 
 @pytest.mark.asyncio

@@ -2,6 +2,9 @@
 
 Meridian is a monorepo for a production-oriented RAG application.
 
+For VS Code launch profiles, safe breakpoint placement, and end-to-end ingestion and
+chat debugging flows, see [DEBUGGING.md](DEBUGGING.md).
+
 It currently includes:
 
 - `apps/web` → Next.js frontend
@@ -63,7 +66,9 @@ At minimum, configure:
 - `APP_BASE_URL`
 - `API_BASE_URL` (for web → api server-side calls, e.g. `http://localhost:8000`)
 
-`OPENAI_API_KEY` is optional and required only when `EMBEDDING_PROVIDER=openai`.
+`OPENAI_API_KEY` is required only when `EMBEDDING_PROVIDER=openai` or when using
+OpenAI-backed contextual chunking. Grounded `POST /api/v1/chat` uses OpenRouter and
+requires `OPENROUTER_API_KEY`.
 
 The web app reads Auth0 values from the same root `.env` file.
 No `.env.local` is required for the current setup.
@@ -93,7 +98,68 @@ Important note for Pinecone `llama-text-embed-v2`:
 - use `EMBEDDING_INPUT_TYPE=passage` for indexing/ingestion
 - use `query` later for retrieval-time query embeddings
 
-### 3.1) Contextual chunking options
+### 3.1) Grounded chat configuration
+
+Chat uses the authenticated user's Pinecone namespace only, then validates every
+candidate against the active Postgres document generation before it reaches the model.
+Pinecone stores retrieval identifiers and small filter metadata only; after a match is
+validated, Meridian loads the authoritative chunk text from Postgres by `chunk_id`.
+This keeps chat working for older vectors without embedded text metadata and prevents
+vector-store metadata from becoming prompt content.
+Configure OpenRouter generation and bounded retrieval/history behavior. The default
+`openrouter/free` model routes each request to a compatible free model:
+
+```env
+OPENROUTER_API_KEY=<your-openrouter-api-key>
+OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
+CHAT_MODEL=openrouter/free
+CHAT_TEMPERATURE=0.2
+CHAT_MAX_OUTPUT_TOKENS=800
+CHAT_CONTEXT_BUDGET_TOKENS=6000
+CHAT_CONTEXT_WINDOW_TOKENS=16000
+CHAT_SAFETY_RESERVE_TOKENS=512
+CHAT_SUMMARY_MAX_TOKENS=1000
+CHAT_HISTORY_MAX_TOKENS=1800
+CHAT_SOURCE_MIN_TOKENS=1200
+CHAT_SOURCE_MAX_TOKENS=4000
+CHAT_RETRIEVAL_TOP_K=12
+CHAT_RETRIEVAL_OVERFETCH=3
+CHAT_RETRIEVAL_MAX_SOURCES=6
+CHAT_RETRIEVAL_SCORE_THRESHOLD=0.2
+CHAT_HISTORY_MAX_MESSAGES=8
+CHAT_SOURCE_PER_DOCUMENT_LIMIT=2
+```
+
+`POST /api/v1/chat` is a POST-SSE endpoint. Its successful stream emits zero or more
+`text` events, exactly one `sources` event, and one `done` event containing the
+conversation ID. If no active qualifying source exists, it returns a grounded
+insufficiency answer with an empty `sources` array. Conversations are owner-scoped;
+only completed assistant answers are persisted. The generation prompt reserves output
+and safety capacity first, then reserves at least `CHAT_SOURCE_MIN_TOKENS` for
+lifecycle-validated PDF evidence before adding a rolling conversation summary or a
+contiguous suffix of recent turns. It never sends a provider request when no source
+can fit. Retrieval uses `CHAT_RETRIEVAL_TOP_K * CHAT_RETRIEVAL_OVERFETCH` candidates,
+then applies active-generation, score, and per-document limits before prompt assembly.
+
+The original user message is retained verbatim. A transient standalone rewrite may be
+used only for vector search; it is never stored as a user message. Assistant citations
+are immutable snapshots of the exact included source generation, locator, bounded
+excerpt, and content hash. A historic citation is marked unavailable if its original
+document generation is no longer active; it is never silently redirected to a later
+re-ingestion generation. Hard document erasure intentionally does not rewrite prior
+assistant text or citation snapshots; product-level transcript erasure remains a
+separate retention/privacy workflow.
+
+### 3.2) Chat context migration and rollout
+
+Apply Alembic revision `0005_conversation_memory` before deploying this feature. It
+backfills a deterministic `sequence_number` from each message's existing
+`created_at, id` order without changing message content, then creates the optional
+per-conversation memory row lazily after a successful grounded response. The downgrade
+removes only the ordering and memory schema; use it only before application code that
+requires these fields is deployed. It does not alter existing transcript content.
+
+### 3.3) Contextual chunking options
 
 The ingestion pipeline now supports three chunking/enrichment modes:
 
@@ -383,6 +449,7 @@ Relevant manual guides in this repo:
 - `ManualTestGuide/Current_Vector_Lifecycle_Swagger_Manual_Guide.md`
 - `ManualTestGuide/CollectionTesting_Manual_Guide.md`
 - `ManualTestGuide/MILESTONE1_MANUAL_TESTS.md`
+- `ManualTestGuide/Grounded_Chat_Swagger_Manual_Guide.md`
 
 For documents/ingestion testing, make sure both API and worker are running before testing upload and queue flow.
 
