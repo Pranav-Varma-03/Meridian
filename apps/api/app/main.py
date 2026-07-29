@@ -13,6 +13,7 @@ from sqlalchemy import text
 
 from app.core.config import get_settings
 from app.core.database import AsyncSessionLocal, close_db, init_db
+from app.core.observability import SecretSafeJsonFormatter, lifecycle_event
 from app.routers import (
     auth_diagnostics,
     chat,
@@ -25,9 +26,12 @@ from app.routers import (
 
 settings = get_settings()
 
+_handler = logging.StreamHandler()
+_handler.setFormatter(SecretSafeJsonFormatter())
 logging.basicConfig(
     level=getattr(logging, settings.log_level, logging.INFO),
-    format="%(asctime)s %(levelname)s %(name)s %(message)s",
+    handlers=[_handler],
+    force=True,
 )
 logger = logging.getLogger(__name__)
 
@@ -39,6 +43,7 @@ def error_response(
     request_id: str,
     status_code: int,
     details: dict | None = None,
+    headers: dict[str, str] | None = None,
 ) -> JSONResponse:
     payload: dict[str, object] = {
         "error": {
@@ -49,13 +54,13 @@ def error_response(
     }
     if details is not None:
         payload["error"]["details"] = details
-    return JSONResponse(status_code=status_code, content=payload)
+    return JSONResponse(status_code=status_code, content=payload, headers=headers)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup and shutdown events."""
-    logger.info("Starting Meridian API", extra={"environment": settings.environment})
+    lifecycle_event(logger, "api_starting", environment=settings.environment)
 
     await init_db()
 
@@ -68,14 +73,14 @@ async def lifespan(app: FastAPI):
     async with AsyncSessionLocal() as session:
         await session.execute(text("SELECT 1"))
 
-    logger.info("Clients initialized successfully")
+    lifecycle_event(logger, "api_clients_initialized")
     yield
 
     if hasattr(app.state, "redis"):
         await app.state.redis.aclose()
     await close_db()
 
-    logger.info("Shutting down Meridian API")
+    lifecycle_event(logger, "api_stopped")
 
 
 app = FastAPI(
@@ -114,12 +119,17 @@ async def http_exception_handler(request: Request, exc: HTTPException):
     request_id = getattr(request.state, "request_id", "unknown")
     detail = exc.detail if isinstance(exc.detail, str) else "Request failed"
     details = exc.detail if isinstance(exc.detail, dict) else None
+    code = "HTTP_ERROR"
+    if isinstance(exc.detail, dict):
+        code = str(exc.detail.get("code", code))
+        detail = str(exc.detail.get("message", detail))
     return error_response(
-        code="HTTP_ERROR",
+        code=code,
         message=detail,
         request_id=request_id,
         details=details,
         status_code=exc.status_code,
+        headers=exc.headers,
     )
 
 

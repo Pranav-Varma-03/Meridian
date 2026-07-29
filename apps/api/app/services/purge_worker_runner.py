@@ -7,10 +7,17 @@ from pinecone import Pinecone
 
 from app.core.config import get_settings
 from app.core.database import AsyncSessionLocal
+from app.core.observability import SecretSafeJsonFormatter
 from app.services import purge_worker
 
 settings = get_settings()
-logging.basicConfig(level=getattr(logging, settings.log_level, logging.INFO))
+_handler = logging.StreamHandler()
+_handler.setFormatter(SecretSafeJsonFormatter())
+logging.basicConfig(
+    level=getattr(logging, settings.log_level, logging.INFO),
+    handlers=[_handler],
+    force=True,
+)
 logger = logging.getLogger(__name__)
 pinecone_client = Pinecone(api_key=settings.pinecone_api_key)
 

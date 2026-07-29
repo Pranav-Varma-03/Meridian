@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
 from app.core.database import AsyncSessionLocal
+from app.core.observability import SecretSafeJsonFormatter, classify_provider_failure
 from app.services import (
     contextual_chunking,
     document_processor,
@@ -19,9 +20,12 @@ from app.services import (
 
 settings = get_settings()
 
+_handler = logging.StreamHandler()
+_handler.setFormatter(SecretSafeJsonFormatter())
 logging.basicConfig(
     level=getattr(logging, settings.log_level, logging.INFO),
-    format="%(asctime)s %(levelname)s %(name)s %(message)s",
+    handlers=[_handler],
+    force=True,
 )
 logger = logging.getLogger(__name__)
 pinecone_client = Pinecone(api_key=settings.pinecone_api_key)
@@ -53,8 +57,12 @@ async def _embed_chunks_with_retry(
             )
         except Exception as exc:
             if attempt >= max_attempts:
+                logger.warning(
+                    "embedding_provider_retry_exhausted",
+                    extra={"failure_class": classify_provider_failure(exc)},
+                )
                 raise ingestion_worker.RetryableIngestionError(
-                    f"Embedding generation failed after retries: {exc}"
+                    "Embedding provider failed after retries"
                 ) from exc
             await asyncio.sleep(0.5 * attempt)
 
@@ -76,8 +84,12 @@ async def _upsert_embeddings_with_retry(
             return
         except Exception as exc:
             if attempt >= max_attempts:
+                logger.warning(
+                    "vector_upsert_retry_exhausted",
+                    extra={"failure_class": classify_provider_failure(exc)},
+                )
                 raise ingestion_worker.RetryableIngestionError(
-                    f"Vector upsert failed after retries: {exc}"
+                    "Vector provider failed after retries"
                 ) from exc
             await asyncio.sleep(0.5 * attempt)
 

@@ -14,6 +14,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.auth import get_current_user
 from app.core.config import get_settings
 from app.core.database import get_db_session
+from app.core.observability import lifecycle_event
+from app.core.rate_limits import require_rate_limit
 from app.models.entities import MessageRole, RetrievalScopeMode, User
 from app.schemas import (
     INTERNAL_ERROR_RESPONSE,
@@ -131,9 +133,12 @@ def _normalized_requested_scope(
     def normalize(
         mode: str, values: list[uuid.UUID]
     ) -> tuple[RetrievalScopeMode, tuple[uuid.UUID, ...]]:
-        unique = tuple(dict.fromkeys(values))
-        if len(unique) != len(values):
+        if len(set(values)) != len(values):
             raise HTTPException(status_code=422, detail="Collection IDs must be unique")
+        # Pinecone's $in filter is set-like. Store/compare a stable canonical order so
+        # matching new and legacy fields do not conflict merely because callers order
+        # the same collection IDs differently.
+        unique = tuple(sorted(values, key=str))
         if mode == "all":
             if unique:
                 raise HTTPException(
@@ -190,6 +195,7 @@ def _normalized_requested_scope(
         401: UNAUTHORIZED_RESPONSE,
         404: NOT_FOUND_RESPONSE,
         422: VALIDATION_ERROR_RESPONSE,
+        429: {"description": "Rate limit exceeded"},
         503: SERVICE_UNAVAILABLE_RESPONSE,
         500: INTERNAL_ERROR_RESPONSE,
     },
@@ -198,6 +204,7 @@ async def chat(
     request: Request,
     payload: ChatRequest,
     current_user: User = Depends(get_current_user),
+    _rate_limit: None = Depends(require_rate_limit("chat")),
     session: AsyncSession = Depends(get_db_session),
 ):
     """Retrieve lifecycle-valid PDF evidence and stream a grounded response."""
@@ -311,6 +318,16 @@ async def chat(
             "rewrite_requested_clarification": rewrite.needs_clarification,
         },
     )
+    lifecycle_event(
+        logger,
+        "chat_retrieval_completed",
+        request_id=getattr(request.state, "request_id", "unknown"),
+        conversation_id=str(conversation.id),
+        retrieval_scope_mode=effective_scope.mode.value,
+        retrieval_scope_version=effective_scope.version,
+        retrieved_source_count=len(sources),
+        included_source_count=len(included_sources),
+    )
 
     async def generate() -> AsyncIterator[str]:
         done_event = {
@@ -379,6 +396,15 @@ async def chat(
             settings=settings,
         )
         await session.commit()
+        lifecycle_event(
+            logger,
+            "chat_generation_completed",
+            request_id=getattr(request.state, "request_id", "unknown"),
+            conversation_id=str(conversation.id),
+            retrieval_scope_mode=effective_scope.mode.value,
+            retrieval_scope_version=effective_scope.version,
+            outcome="success",
+        )
         yield _sse({"type": "sources", "content": normalized_sources})
         yield _sse(done_event)
 

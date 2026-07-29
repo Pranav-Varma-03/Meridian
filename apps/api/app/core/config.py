@@ -29,6 +29,13 @@ class Settings(BaseSettings):
     ingestion_worker_stuck_timeout_seconds: float = Field(default=900.0, gt=0, le=86400)
     purge_worker_stuck_timeout_seconds: float = Field(default=900.0, gt=0, le=86400)
 
+    # Expensive-route protection. Redis coordinates these limits across API instances.
+    rate_limit_enabled: bool = True
+    chat_rate_limit_requests: int = Field(default=20, gt=0, le=10000)
+    chat_rate_limit_window_seconds: int = Field(default=60, gt=0, le=86400)
+    upload_rate_limit_requests: int = Field(default=10, gt=0, le=10000)
+    upload_rate_limit_window_seconds: int = Field(default=3600, gt=0, le=86400)
+
     # OpenAI
     openai_api_key: str | None = None
 

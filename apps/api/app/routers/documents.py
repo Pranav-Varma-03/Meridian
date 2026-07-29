@@ -18,11 +18,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.auth import get_current_user
 from app.core.config import get_settings
 from app.core.database import get_db_session
+from app.core.observability import lifecycle_event
+from app.core.rate_limits import require_rate_limit
 from app.models.entities import User
 from app.schemas import (
     INTERNAL_ERROR_RESPONSE,
     NOT_FOUND_RESPONSE,
     PAYLOAD_TOO_LARGE_RESPONSE,
+    SERVICE_UNAVAILABLE_RESPONSE,
     UNAUTHORIZED_RESPONSE,
     UNSUPPORTED_MEDIA_RESPONSE,
     VALIDATION_ERROR_RESPONSE,
@@ -132,6 +135,8 @@ class MessageResponse(BaseModel):
         413: PAYLOAD_TOO_LARGE_RESPONSE,
         415: UNSUPPORTED_MEDIA_RESPONSE,
         422: VALIDATION_ERROR_RESPONSE,
+        429: {"description": "Rate limit exceeded"},
+        503: SERVICE_UNAVAILABLE_RESPONSE,
         500: INTERNAL_ERROR_RESPONSE,
     },
 )
@@ -141,6 +146,7 @@ async def upload_document(
     file: UploadFile = File(...),
     collection_id: uuid.UUID | None = None,
     current_user: User = Depends(get_current_user),
+    _rate_limit: None = Depends(require_rate_limit("upload")),
     session: AsyncSession = Depends(get_db_session),
 ):
     """
@@ -201,6 +207,17 @@ async def upload_document(
                         "document_id": str(getattr(result.document, "id", "unknown")),
                     },
                 )
+
+    lifecycle_event(
+        logger,
+        "document_upload_accepted",
+        request_id=getattr(request.state, "request_id", "unknown"),
+        document_id=str(result.document.id),
+        ingestion_job_id=str(result.job.id),
+        deduplicated=deduplicated,
+        enqueue_job=enqueue_job,
+        outcome="accepted",
+    )
 
     if reused_existing_job:
         if job_status in {"queued", "processing"}:

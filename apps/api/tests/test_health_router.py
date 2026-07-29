@@ -2,6 +2,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from app.routers import health
 from app.routers.health import health_check
 
 
@@ -64,3 +65,28 @@ async def test_health_check_degraded_when_dependencies_fail() -> None:
     assert result.status == "degraded"
     assert result.redis == "unhealthy"
     assert result.database == "unhealthy"
+
+
+@pytest.mark.asyncio
+async def test_liveness_does_not_require_dependencies() -> None:
+    result = await health.liveness_check()
+
+    assert result.status == "healthy"
+
+
+@pytest.mark.asyncio
+async def test_readiness_reports_dependency_failure_without_leaking_exception(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request = _request_with(_FailingRedis(), _FailingSession())
+    request.app.state.pinecone = object()
+    response = SimpleNamespace(status_code=200)
+    monkeypatch.setattr(health, "_generation_status", lambda: "unhealthy")
+
+    result = await health.readiness_check(request, response)
+
+    assert response.status_code == 503
+    assert result.status == "unhealthy"
+    assert result.redis == "unhealthy"
+    assert result.database == "unhealthy"
+    assert result.pinecone == "unhealthy"

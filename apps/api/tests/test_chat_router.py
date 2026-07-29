@@ -262,6 +262,34 @@ async def test_chat_rejects_conflicting_scope_fields(
 
 
 @pytest.mark.asyncio
+async def test_chat_accepts_matching_scope_fields_in_different_order(
+    api_client: AsyncClient,
+    chat_dependencies,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first, second = uuid.uuid4(), uuid.uuid4()
+    expected = sorted([first, second], key=str)
+
+    async def _retrieve(*_args, **kwargs):
+        assert kwargs["collection_ids"] == expected
+        return []
+
+    monkeypatch.setattr(retrieval, "retrieve_sources", _retrieve)
+    response = await api_client.post(
+        "/api/v1/chat",
+        json={
+            "query": "Question",
+            "collection_ids": [str(second), str(first)],
+            "retrieval_scope": {
+                "mode": "collections",
+                "collection_ids": [str(first), str(second)],
+            },
+        },
+    )
+    assert response.status_code == 200
+
+
+@pytest.mark.asyncio
 async def test_chat_bypasses_provider_when_retrieved_evidence_cannot_fit(
     api_client: AsyncClient,
     chat_dependencies,

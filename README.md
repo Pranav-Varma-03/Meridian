@@ -416,6 +416,11 @@ Notes:
 
 ### Generation and purge lifecycle
 
+- Alembic `0003_document_ingestion_generations` establishes the document/generation,
+  vector-manifest, purge-job, and outbox lifecycle; `0004_add_ingestion_job_retry_schedule`
+  adds durable retry scheduling and processing leases. Postgres is the lifecycle
+  authority, Redis only wakes workers, and Pinecone is an eventually consistent
+  projection in owner namespaces (`user:<user_id>`).
 - A repeated identical upload is deduplication, not re-ingestion: it reuses the
   existing user-owned document/job and does not mutate vectors.
 - `POST /api/v1/ingest` is the explicit, permission-gated re-ingestion path. It
@@ -462,6 +467,7 @@ Relevant manual guides in this repo:
 - `ManualTestGuide/CollectionTesting_Manual_Guide.md`
 - `ManualTestGuide/MILESTONE1_MANUAL_TESTS.md`
 - `ManualTestGuide/Grounded_Chat_Swagger_Manual_Guide.md`
+- `ManualTestGuide/Production_Hardening_Swagger_Manual_Guide.md`
 
 For documents/ingestion testing, make sure both API and worker are running before testing upload and queue flow.
 
@@ -585,3 +591,28 @@ cd apps/api && .venv/bin/alembic heads
 # Create a reviewed migration from model changes
 make db-revision msg='describe_change'
 ```
+
+## Production operations
+
+`/health/live` confirms that the API process is running and never probes external
+dependencies. `/health/ready` checks Postgres, Redis, Pinecone index access, and
+generation-provider configuration; it returns `503` when any required dependency is
+unavailable. The existing `/health` remains a backwards-compatible Redis/Postgres
+status endpoint.
+
+Authenticated cost-bearing routes are Redis-coordinated and fail closed when Redis is
+unavailable: chat is limited to 20 requests/minute and uploads to 10 requests/hour by
+default. Configure `RATE_LIMIT_*` values per environment; clients receive `429` with
+`Retry-After` when over limit and `503` when protection cannot coordinate.
+
+Deploy a lifecycle release in this order: apply its reviewed Alembic migration, deploy
+the API, start compatible workers, verify `/health/ready`, then execute the Swagger
+smoke test in `ManualTestGuide/Production_Hardening_Swagger_Manual_Guide.md`. Prefer a
+forward migration and application rollback; do not reset or drop production tables.
+
+Operations should alert on readiness failures, rate-limit spikes, ingestion/purge jobs
+past their lease timeout, retry exhaustion, terminal purge failures, and failed
+Pinecone convergence. Logs are structured and deliberately omit credentials, tokens,
+prompts, source text, and vectors. Restore from the managed Postgres provider's tested
+point-in-time backup process; after restoration, run Alembic `current`, readiness, and
+the two-document smoke test before accepting traffic.

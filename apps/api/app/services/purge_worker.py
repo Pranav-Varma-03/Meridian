@@ -7,6 +7,7 @@ from pathlib import Path
 from sqlalchemy import or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.observability import classify_provider_failure
 from app.models.entities import (
     Document,
     DocumentIngestionGeneration,
@@ -180,9 +181,7 @@ async def process_purge_job(
                 "generation_id": str(job.generation_id) if job.generation_id else None,
                 "vector_count": len(vector_ids),
                 "attempt": job.attempts,
-                "failure_class": type(exc.__cause__).__name__
-                if exc.__cause__
-                else type(exc).__name__,
+                "failure_class": classify_provider_failure(exc.__cause__ or exc),
             },
         )
         return
