@@ -127,6 +127,37 @@ SERVICE_UNAVAILABLE_RESPONSE = {
     },
 }
 
+RATE_LIMITED_RESPONSE = {
+    "model": ErrorEnvelope,
+    "description": "Authenticated user exceeded the configured request limit",
+    "headers": {
+        "Retry-After": {
+            "description": "Seconds until the current rate-limit window expires",
+            "schema": {"type": "integer", "minimum": 1},
+        }
+    },
+    "content": {
+        "application/json": {
+            "example": error_example(
+                "RATE_LIMITED", "Too many requests; try again later"
+            )
+        }
+    },
+}
+
+RATE_LIMIT_DEPENDENCY_UNAVAILABLE_RESPONSE = {
+    "model": ErrorEnvelope,
+    "description": "Rate-limit coordination dependency is unavailable",
+    "content": {
+        "application/json": {
+            "example": error_example(
+                "RATE_LIMIT_DEPENDENCY_UNAVAILABLE",
+                "Request protection is temporarily unavailable",
+            )
+        }
+    },
+}
+
 PAYLOAD_TOO_LARGE_RESPONSE = {
     "model": ErrorEnvelope,
     "description": "Payload too large",

@@ -38,6 +38,15 @@ class LivenessResponse(BaseModel):
     status: str
     timestamp: str
 
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "status": "healthy",
+                "timestamp": "2026-07-29T10:00:00+00:00",
+            }
+        }
+    )
+
 
 class ReadinessResponse(BaseModel):
     api: str
@@ -47,6 +56,20 @@ class ReadinessResponse(BaseModel):
     generation: str
     status: str
     timestamp: str
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "api": "healthy",
+                "database": "healthy",
+                "redis": "healthy",
+                "pinecone": "healthy",
+                "generation": "healthy",
+                "status": "healthy",
+                "timestamp": "2026-07-29T10:00:00+00:00",
+            }
+        }
+    )
 
 
 def _timestamp() -> str:

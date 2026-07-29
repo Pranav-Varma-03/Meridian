@@ -1,19 +1,23 @@
 import logging
 import uuid
 from datetime import datetime
+from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Body, Depends, HTTPException, Request
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import get_current_user, require_document_reingest_permission
 from app.core.config import get_settings
 from app.core.database import get_db_session
+from app.core.rate_limits import require_rate_limit
 from app.models.entities import ReingestionReason, User
 from app.schemas import (
     FORBIDDEN_RESPONSE,
     INTERNAL_ERROR_RESPONSE,
     NOT_FOUND_RESPONSE,
+    RATE_LIMIT_DEPENDENCY_UNAVAILABLE_RESPONSE,
+    RATE_LIMITED_RESPONSE,
     UNAUTHORIZED_RESPONSE,
     VALIDATION_ERROR_RESPONSE,
 )
@@ -85,28 +89,57 @@ class IngestionJobResponse(BaseModel):
     )
 
 
+REINGEST_REQUEST_EXAMPLES = {
+    "manual_repair": {
+        "summary": "Repair a document after an operational issue",
+        "value": {
+            "document_id": "9f4f8cce-b7b4-4a0a-b529-4f6f5906d5e4",
+            "reason": "manual_repair",
+        },
+    },
+    "model_migration": {
+        "summary": "Create vectors using a new embedding model",
+        "value": {
+            "document_id": "9f4f8cce-b7b4-4a0a-b529-4f6f5906d5e4",
+            "reason": "model_migration",
+        },
+    },
+    "chunking_change": {
+        "summary": "Create vectors after changing the chunking strategy",
+        "value": {
+            "document_id": "9f4f8cce-b7b4-4a0a-b529-4f6f5906d5e4",
+            "reason": "chunking_change",
+        },
+    },
+}
+
+
 @router.post(
     "",
     response_model=IngestAcceptedResponse,
     status_code=202,
     summary="Queue ingestion job",
     description=(
-        "Creates a queued re-ingestion job for an existing user document. "
-        "Requires the Auth0 `documents:reingest` permission."
+        "Creates or reuses an active re-ingestion job for an existing user document. "
+        "Requires the Auth0 `documents:reingest` permission and shares the "
+        "configured upload/ingestion rate-limit bucket."
     ),
     responses={
         401: UNAUTHORIZED_RESPONSE,
         403: FORBIDDEN_RESPONSE,
         404: NOT_FOUND_RESPONSE,
         422: VALIDATION_ERROR_RESPONSE,
+        429: RATE_LIMITED_RESPONSE,
+        503: RATE_LIMIT_DEPENDENCY_UNAVAILABLE_RESPONSE,
         500: INTERNAL_ERROR_RESPONSE,
     },
 )
 async def queue_ingestion(
-    payload: IngestRequest,
+    payload: Annotated[IngestRequest, Body(openapi_examples=REINGEST_REQUEST_EXAMPLES)],
     request: Request,
     _claims: dict = Depends(require_document_reingest_permission),
     current_user: User = Depends(get_current_user),
+    _rate_limit: None = Depends(require_rate_limit("upload")),
     session: AsyncSession = Depends(get_db_session),
 ):
     try:

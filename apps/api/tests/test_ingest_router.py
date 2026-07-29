@@ -34,11 +34,42 @@ os.environ.setdefault("AUTH0_DOMAIN", "example.auth0.com")
 os.environ.setdefault("AUTH0_AUDIENCE", "https://api.example.com")
 os.environ.setdefault("AUTH0_CLIENT_ID", "test-client-id")
 
+from app.core import rate_limits
 from app.core.auth import get_current_user, require_document_reingest_permission
 from app.core.database import get_db_session
 from app.main import app
 from app.services import documents as document_service
 from app.services import ingestion_worker as ingestion_worker_service
+
+
+class _RateLimitRedis:
+    def __init__(self, count: int) -> None:
+        self.count = count
+
+    async def incr(self, _key: str) -> int:
+        return self.count
+
+    async def expire(self, _key: str, _seconds: int) -> None:
+        return None
+
+    async def ttl(self, _key: str) -> int:
+        return 30
+
+
+class _UnavailableRateLimitRedis:
+    async def incr(self, _key: str) -> int:
+        raise OSError("Redis unavailable")
+
+
+def _production_rate_limit_settings():
+    return types.SimpleNamespace(
+        rate_limit_enabled=True,
+        environment="production",
+        chat_rate_limit_requests=20,
+        chat_rate_limit_window_seconds=60,
+        upload_rate_limit_requests=10,
+        upload_rate_limit_window_seconds=3600,
+    )
 
 
 @pytest_asyncio.fixture
@@ -126,6 +157,51 @@ async def test_queue_ingestion_requires_reason(
 
     assert response.status_code == 422
     assert "reason" in response.text
+
+
+@pytest.mark.asyncio
+async def test_queue_ingestion_rate_limit_prevents_job_creation(
+    api_client: AsyncClient,
+    override_auth_and_db,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def _create_job(_session, **_kwargs):
+        raise AssertionError("rate-limited request must not create an ingestion job")
+
+    app.state.redis = _RateLimitRedis(count=11)
+    monkeypatch.setattr(rate_limits, "get_settings", _production_rate_limit_settings)
+    monkeypatch.setattr(document_service, "create_ingestion_job", _create_job)
+
+    response = await api_client.post(
+        "/api/v1/ingest",
+        json={"document_id": str(uuid.uuid4()), "reason": "manual_repair"},
+    )
+
+    assert response.status_code == 429
+    assert response.headers["retry-after"] == "30"
+    assert response.json()["error"]["code"] == "RATE_LIMITED"
+
+
+@pytest.mark.asyncio
+async def test_queue_ingestion_redis_outage_prevents_job_creation(
+    api_client: AsyncClient,
+    override_auth_and_db,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def _create_job(_session, **_kwargs):
+        raise AssertionError("unprotected request must not create an ingestion job")
+
+    app.state.redis = _UnavailableRateLimitRedis()
+    monkeypatch.setattr(rate_limits, "get_settings", _production_rate_limit_settings)
+    monkeypatch.setattr(document_service, "create_ingestion_job", _create_job)
+
+    response = await api_client.post(
+        "/api/v1/ingest",
+        json={"document_id": str(uuid.uuid4()), "reason": "manual_repair"},
+    )
+
+    assert response.status_code == 503
+    assert response.json()["error"]["code"] == "RATE_LIMIT_DEPENDENCY_UNAVAILABLE"
 
 
 @pytest.mark.asyncio

@@ -3,9 +3,9 @@ import logging
 import uuid
 from collections.abc import AsyncIterator
 from datetime import datetime
-from typing import Literal
+from typing import Annotated, Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from openai import AsyncOpenAI
 from pydantic import BaseModel, ConfigDict, Field
@@ -20,7 +20,8 @@ from app.models.entities import MessageRole, RetrievalScopeMode, User
 from app.schemas import (
     INTERNAL_ERROR_RESPONSE,
     NOT_FOUND_RESPONSE,
-    SERVICE_UNAVAILABLE_RESPONSE,
+    RATE_LIMIT_DEPENDENCY_UNAVAILABLE_RESPONSE,
+    RATE_LIMITED_RESPONSE,
     UNAUTHORIZED_RESPONSE,
     VALIDATION_ERROR_RESPONSE,
 )
@@ -39,6 +40,16 @@ logger = logging.getLogger(__name__)
 class RetrievalScopeRequest(BaseModel):
     mode: Literal["all", "collections"]
     collection_ids: list[uuid.UUID] = Field(default_factory=list, max_length=50)
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "collection_ids": ["111a22bb-1q1q-431b-8f1f-51600a10b9e2"],
+                "conversation_id": "a11bb22c-051a-47e9-b2ca-a0b090e201e8",
+                "query": "What is a RAG?",
+            }
+        }
+    )
 
 
 class RetrievalScopeResponse(BaseModel):
@@ -61,8 +72,10 @@ class ChatRequest(BaseModel):
         json_schema_extra={
             "example": {
                 "query": "Summarize the onboarding policy",
-                "conversation_id": "152dc37c-de00-47d0-a47c-3a2f7804cbb1",
-                "collection_ids": ["7ecff269-f648-4601-8d97-1c6f0fabf906"],
+                "retrieval_scope": {
+                    "mode": "collections",
+                    "collection_ids": ["7ecff269-f648-4601-8d97-1c6f0fabf906"],
+                },
             }
         }
     )
@@ -73,6 +86,17 @@ class ConversationSummary(BaseModel):
     title: str | None
     updated_at: datetime
     retrieval_scope: RetrievalScopeResponse
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "id": "152dc37c-de00-47d0-a47c-3a2f7804cbb1",
+                "title": "Onboarding policy",
+                "updated_at": "2026-07-29T10:00:00Z",
+                "retrieval_scope": {"mode": "all", "collection_ids": [], "version": 1},
+            }
+        }
+    )
 
 
 class ConversationListResponse(BaseModel):
@@ -87,6 +111,18 @@ class ConversationMessage(BaseModel):
     citations: dict
     created_at: datetime
 
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "id": "4732b4b5-d351-4b0d-8dd1-ef2db2a893a8",
+                "role": "assistant",
+                "content": "The policy requires ...",
+                "citations": {"sources": []},
+                "created_at": "2026-07-29T10:00:01Z",
+            }
+        }
+    )
+
 
 class ConversationResponse(BaseModel):
     id: str
@@ -94,6 +130,18 @@ class ConversationResponse(BaseModel):
     messages: list[ConversationMessage]
     retrieval_scope: RetrievalScopeResponse
     scope_events: list[ConversationScopeEventResponse]
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "id": "152dc37c-de00-47d0-a47c-3a2f7804cbb1",
+                "title": "Onboarding policy",
+                "messages": [],
+                "retrieval_scope": {"mode": "all", "collection_ids": [], "version": 1},
+                "scope_events": [],
+            }
+        }
+    )
 
 
 class MessageResponse(BaseModel):
@@ -122,6 +170,61 @@ def _scope_response(
         collection_ids=[str(value) for value in scope.collection_ids],
         version=scope.version,
     )
+
+
+CHAT_REQUEST_EXAMPLES = {
+    "all_documents": {
+        "summary": "Start a conversation across all active documents",
+        "value": {
+            "query": "Summarize the onboarding policy",
+            "retrieval_scope": {"mode": "all"},
+        },
+    },
+    "selected_collections": {
+        "summary": "Start a conversation scoped to selected collections",
+        "value": {
+            "query": "What is the retention policy?",
+            "retrieval_scope": {
+                "mode": "collections",
+                "collection_ids": ["7ecff269-f648-4601-8d97-1c6f0fabf906"],
+            },
+        },
+    },
+    "continue_without_scope_change": {
+        "summary": "Continue using the conversation's saved scope",
+        "value": {
+            "query": "How does that apply to contractors?",
+            "conversation_id": "152dc37c-de00-47d0-a47c-3a2f7804cbb1",
+        },
+    },
+    "continue_with_scope_change": {
+        "summary": "Continue and replace the saved scope for this turn",
+        "value": {
+            "query": "Compare this with engineering guidance",
+            "conversation_id": "152dc37c-de00-47d0-a47c-3a2f7804cbb1",
+            "retrieval_scope": {
+                "mode": "collections",
+                "collection_ids": ["a05ac6d2-5fb7-4eb1-af6a-31a1057dcb1c"],
+            },
+        },
+    },
+    "legacy_collection_ids": {
+        "summary": "Legacy compatibility only",
+        "description": "Prefer retrieval_scope for new clients.",
+        "value": {
+            "query": "Summarize the onboarding policy",
+            "collection_ids": ["7ecff269-f648-4601-8d97-1c6f0fabf906"],
+        },
+    },
+    "invalid_conflicting_scopes": {
+        "summary": "Invalid: legacy and new fields conflict",
+        "value": {
+            "query": "Summarize the onboarding policy",
+            "collection_ids": ["7ecff269-f648-4601-8d97-1c6f0fabf906"],
+            "retrieval_scope": {"mode": "all"},
+        },
+    },
+}
 
 
 def _normalized_requested_scope(
@@ -195,14 +298,14 @@ def _normalized_requested_scope(
         401: UNAUTHORIZED_RESPONSE,
         404: NOT_FOUND_RESPONSE,
         422: VALIDATION_ERROR_RESPONSE,
-        429: {"description": "Rate limit exceeded"},
-        503: SERVICE_UNAVAILABLE_RESPONSE,
+        429: RATE_LIMITED_RESPONSE,
+        503: RATE_LIMIT_DEPENDENCY_UNAVAILABLE_RESPONSE,
         500: INTERNAL_ERROR_RESPONSE,
     },
 )
 async def chat(
     request: Request,
-    payload: ChatRequest,
+    payload: Annotated[ChatRequest, Body(openapi_examples=CHAT_REQUEST_EXAMPLES)],
     current_user: User = Depends(get_current_user),
     _rate_limit: None = Depends(require_rate_limit("chat")),
     session: AsyncSession = Depends(get_db_session),

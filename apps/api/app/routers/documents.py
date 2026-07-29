@@ -25,7 +25,8 @@ from app.schemas import (
     INTERNAL_ERROR_RESPONSE,
     NOT_FOUND_RESPONSE,
     PAYLOAD_TOO_LARGE_RESPONSE,
-    SERVICE_UNAVAILABLE_RESPONSE,
+    RATE_LIMIT_DEPENDENCY_UNAVAILABLE_RESPONSE,
+    RATE_LIMITED_RESPONSE,
     UNAUTHORIZED_RESPONSE,
     UNSUPPORTED_MEDIA_RESPONSE,
     VALIDATION_ERROR_RESPONSE,
@@ -119,6 +120,16 @@ class MessageResponse(BaseModel):
     )
 
 
+class DocumentDeleteResponse(BaseModel):
+    message: str
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {"message": "Document deleted and cleanup queued"}
+        }
+    )
+
+
 @router.post(
     "/upload",
     response_model=DocumentUploadAccepted,
@@ -135,16 +146,25 @@ class MessageResponse(BaseModel):
         413: PAYLOAD_TOO_LARGE_RESPONSE,
         415: UNSUPPORTED_MEDIA_RESPONSE,
         422: VALIDATION_ERROR_RESPONSE,
-        429: {"description": "Rate limit exceeded"},
-        503: SERVICE_UNAVAILABLE_RESPONSE,
+        429: RATE_LIMITED_RESPONSE,
+        503: RATE_LIMIT_DEPENDENCY_UNAVAILABLE_RESPONSE,
         500: INTERNAL_ERROR_RESPONSE,
     },
 )
 async def upload_document(
     request: Request,
     response: Response,
-    file: UploadFile = File(...),
-    collection_id: uuid.UUID | None = None,
+    file: UploadFile = File(
+        ..., description="PDF, DOCX, or TXT file no larger than 10 MiB"
+    ),
+    collection_id: uuid.UUID | None = Query(
+        default=None,
+        description=(
+            "Optional user-owned collection. Omit to keep the document unfiled; "
+            "the collection is a query parameter, not multipart form data."
+        ),
+        examples={"product_docs": {"value": "7ecff269-f648-4601-8d97-1c6f0fabf906"}},
+    ),
     current_user: User = Depends(get_current_user),
     _rate_limit: None = Depends(require_rate_limit("upload")),
     session: AsyncSession = Depends(get_db_session),
@@ -341,12 +361,12 @@ async def get_document(
 
 @router.delete(
     "/{document_id}",
-    response_model=MessageResponse,
+    response_model=DocumentDeleteResponse,
     status_code=200,
     summary="Delete document",
     description=(
-        "Deletes document data and its owner-scoped Pinecone vectors before "
-        "returning a success message."
+        "Immediately logically deletes the document from application reads and "
+        "queues durable asynchronous file and owner-scoped Pinecone cleanup."
     ),
     responses={
         401: UNAUTHORIZED_RESPONSE,
@@ -372,4 +392,4 @@ async def delete_document(
         )
     except document_service.DocumentNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
-    return MessageResponse(message="Document deleted and cleanup queued")
+    return DocumentDeleteResponse(message="Document deleted and cleanup queued")

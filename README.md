@@ -247,7 +247,7 @@ That endpoint verifies JWT and upserts the user into Postgres.
 It verifies the submitted access token normally and returns only `iss`, `aud`, and
 `permissions`; it never returns the raw token or profile claims. The route returns
 `404` outside development. Use it through Swagger as described in
-`ManualTestGuide/Auth0_API_Permissions_Swagger_Manual_Guide.md`.
+`ManualTestGuide/API_Contract_Reference.md`.
 
 ### 5) Install dependencies
 
@@ -462,11 +462,7 @@ Open:
 
 Relevant manual guides in this repo:
 
-- `ManualTestGuide/Documents_Ingestion_Swagger_Manual_Guide.md`
-- `ManualTestGuide/Current_Vector_Lifecycle_Swagger_Manual_Guide.md`
-- `ManualTestGuide/CollectionTesting_Manual_Guide.md`
-- `ManualTestGuide/MILESTONE1_MANUAL_TESTS.md`
-- `ManualTestGuide/Grounded_Chat_Swagger_Manual_Guide.md`
+- `ManualTestGuide/API_Contract_Reference.md`
 - `ManualTestGuide/Production_Hardening_Swagger_Manual_Guide.md`
 
 For documents/ingestion testing, make sure both API and worker are running before testing upload and queue flow.

@@ -54,17 +54,156 @@ async def test_openapi_contract_status_codes(api_client: AsyncClient) -> None:
 
     paths = response.json()["paths"]
 
-    assert paths["/api/v1/collections"]["post"]["responses"].get("201")
-    assert paths["/api/v1/documents/upload"]["post"]["responses"].get("202")
-    assert paths["/api/v1/documents/{document_id}"]["delete"]["responses"].get("200")
-    assert paths["/api/v1/ingest"]["post"]["responses"].get("202")
-    assert paths["/api/v1/ingest"]["post"]["responses"].get("403")
-    assert paths["/api/v1/ingest/{job_id}"]["get"]["responses"].get("200")
-    assert paths["/api/v1/auth/token-claims"]["get"]["responses"].get("200")
-    assert paths["/api/v1/auth/token-claims"]["get"]["responses"].get("404")
-    assert paths["/api/v1/chat"]["post"]["responses"].get("200")
-    assert paths["/api/v1/chat"]["post"]["responses"].get("429")
-    assert paths["/api/v1/documents/upload"]["post"]["responses"].get("429")
+    expected_response_codes = {
+        ("/", "get"): {"200"},
+        ("/health", "get"): {"200", "500"},
+        ("/health/live", "get"): {"200"},
+        ("/health/ready", "get"): {"200", "503"},
+        ("/api/v1/auth/token-claims", "get"): {"200", "401", "404"},
+        ("/api/v1/users/me", "post"): {"200", "401", "500"},
+        ("/api/v1/collections", "post"): {"201", "401", "409", "422", "500"},
+        ("/api/v1/collections", "get"): {"200", "401", "422", "500"},
+        ("/api/v1/collections/{collection_id}", "get"): {
+            "200",
+            "401",
+            "404",
+            "422",
+            "500",
+        },
+        ("/api/v1/collections/{collection_id}", "patch"): {
+            "200",
+            "400",
+            "401",
+            "404",
+            "409",
+            "422",
+            "500",
+        },
+        ("/api/v1/collections/{collection_id}", "delete"): {
+            "200",
+            "401",
+            "404",
+            "422",
+            "500",
+        },
+        ("/api/v1/documents/upload", "post"): {
+            "200",
+            "202",
+            "401",
+            "404",
+            "413",
+            "415",
+            "422",
+            "429",
+            "500",
+            "503",
+        },
+        ("/api/v1/documents", "get"): {"200", "401", "404", "422", "500"},
+        ("/api/v1/documents/{document_id}", "get"): {
+            "200",
+            "401",
+            "404",
+            "422",
+            "500",
+        },
+        ("/api/v1/documents/{document_id}", "delete"): {
+            "200",
+            "401",
+            "404",
+            "422",
+            "500",
+        },
+        ("/api/v1/ingest", "post"): {
+            "202",
+            "401",
+            "403",
+            "404",
+            "422",
+            "429",
+            "500",
+            "503",
+        },
+        ("/api/v1/ingest/{job_id}", "get"): {"200", "401", "404", "422", "500"},
+        ("/api/v1/chat", "post"): {
+            "200",
+            "401",
+            "404",
+            "422",
+            "429",
+            "500",
+            "503",
+        },
+        ("/api/v1/chat/conversations", "get"): {"200", "401", "422", "500"},
+        ("/api/v1/chat/conversations/{conversation_id}", "get"): {
+            "200",
+            "401",
+            "404",
+            "422",
+            "500",
+        },
+        ("/api/v1/chat/conversations/{conversation_id}", "delete"): {
+            "200",
+            "401",
+            "404",
+            "422",
+            "500",
+        },
+    }
+    for (path, method), expected_codes in expected_response_codes.items():
+        assert expected_codes <= set(paths[path][method]["responses"])
+
+
+@pytest.mark.asyncio
+async def test_openapi_examples_describe_current_chat_and_lifecycle_contract(
+    api_client: AsyncClient,
+) -> None:
+    schema = (await api_client.get("/openapi.json")).json()
+    paths = schema["paths"]
+
+    chat_content = paths["/api/v1/chat"]["post"]["requestBody"]["content"]
+    examples = chat_content["application/json"]["examples"]
+    assert examples["all_documents"]["value"]["retrieval_scope"] == {"mode": "all"}
+    assert (
+        examples["selected_collections"]["value"]["retrieval_scope"]["mode"]
+        == "collections"
+    )
+    assert examples["legacy_collection_ids"]["value"]["collection_ids"]
+    assert examples["invalid_conflicting_scopes"]["value"]["retrieval_scope"] == {
+        "mode": "all"
+    }
+
+    upload = paths["/api/v1/documents/upload"]["post"]
+    collection_parameter = next(
+        item for item in upload["parameters"] if item["name"] == "collection_id"
+    )
+    assert collection_parameter["in"] == "query"
+    assert "unfiled" in collection_parameter["description"]
+
+    assert (
+        "asynchronous"
+        in paths["/api/v1/documents/{document_id}"]["delete"]["description"]
+    )
+    assert (
+        "unfiled"
+        in paths["/api/v1/collections/{collection_id}"]["delete"]["description"]
+    )
+
+    ingestion_responses = paths["/api/v1/ingest"]["post"]["responses"]
+    assert ingestion_responses["429"]["headers"]["Retry-After"]
+    assert (
+        ingestion_responses["503"]["content"]["application/json"]["example"]["error"][
+            "code"
+        ]
+        == "RATE_LIMIT_DEPENDENCY_UNAVAILABLE"
+    )
+    reingest_examples = paths["/api/v1/ingest"]["post"]["requestBody"]["content"][
+        "application/json"
+    ]["examples"]
+    assert set(reingest_examples) == {
+        "manual_repair",
+        "model_migration",
+        "chunking_change",
+    }
 
 
 @pytest.mark.asyncio

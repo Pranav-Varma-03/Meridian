@@ -262,7 +262,10 @@ async def update_collection(
     response_model=MessageResponse,
     status_code=200,
     summary="Delete collection",
-    description="Deletes a collection and handles document reassignment or deletion.",
+    description=(
+        "Deletes a collection for the authenticated user. Associated documents remain "
+        "active and become unfiled (`collection_id` is set to null)."
+    ),
     responses={
         401: UNAUTHORIZED_RESPONSE,
         404: NOT_FOUND_RESPONSE,
@@ -276,8 +279,8 @@ async def delete_collection(
     session: AsyncSession = Depends(get_db_session),
 ):
     """
-    Delete a collection and optionally its documents.
-    Documents can be moved to default collection or deleted.
+    Delete a collection without deleting its documents.
+    Associated documents are retained and become unfiled by database foreign-key policy.
     """
     try:
         await collection_service.delete_collection(
