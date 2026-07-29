@@ -183,6 +183,20 @@ async def test_openapi_examples_describe_current_chat_and_lifecycle_contract(
         "asynchronous"
         in paths["/api/v1/documents/{document_id}"]["delete"]["description"]
     )
+    document_schema = schema["components"]["schemas"]["DocumentResponse"]
+    latest_job_schema = document_schema["properties"]["latest_job"]
+    assert latest_job_schema["anyOf"][0]["$ref"].endswith("/DocumentLatestJobResponse")
+    assert set(
+        schema["components"]["schemas"]["DocumentLatestJobResponse"]["properties"]
+    ) == {
+        "id",
+        "status",
+        "attempts",
+        "error",
+        "started_at",
+        "completed_at",
+        "generation",
+    }
     assert (
         "unfiled"
         in paths["/api/v1/collections/{collection_id}"]["delete"]["description"]

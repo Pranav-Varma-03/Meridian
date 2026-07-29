@@ -48,6 +48,18 @@ export interface DocumentResponse {
   created_at: string;
   chunk_count: number | null;
   file_size: number;
+  /** Latest owner-scoped ingestion attempt; null for documents without job history. */
+  latest_job: DocumentLatestJobResponse | null;
+}
+
+export interface DocumentLatestJobResponse {
+  id: string;
+  status: IngestionJobStatus;
+  attempts: number;
+  error: string | null;
+  started_at: string | null;
+  completed_at: string | null;
+  generation: number | null;
 }
 
 export interface DocumentListResponse extends PaginationResponse {

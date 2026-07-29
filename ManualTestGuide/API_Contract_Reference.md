@@ -114,6 +114,13 @@ already owned by the user, with `deduplicated: true` and
 `reused_existing_job: true`. Poll the returned `job_id` until its status reaches
 `ready` or `failed`; do not treat `202` as provider completion.
 
+Both document read endpoints now include additive `latest_job` data when an ingestion
+attempt exists. It is the newest owner-scoped attempt and has `id`, `status`,
+`attempts`, `error`, `started_at`, `completed_at`, and the available `generation`.
+The document's `status` remains the stable document-level status, so consumers should
+use `latest_job.status` to show the current/recent attempt and tolerate
+`latest_job: null` for legacy documents with no job history.
+
 Document deletion returns:
 
 ```json

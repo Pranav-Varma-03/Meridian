@@ -39,6 +39,15 @@ class IngestionJobNotFoundError(Exception):
 class DocumentWithCount:
     document: Document
     chunk_count: int
+    latest_job: "IngestionJobSummary | None" = None
+
+
+@dataclass(slots=True)
+class IngestionJobSummary:
+    """The most recent ingestion attempt shown by document read endpoints."""
+
+    job: IngestionJob
+    generation_number: int | None
 
 
 @dataclass(slots=True)
@@ -308,8 +317,15 @@ async def list_documents(
         .offset(offset)
     )
     rows = result.all()
+    document_ids = [row[0].id for row in rows]
+    latest_jobs = await _latest_jobs_by_document(session, document_ids=document_ids)
     documents = [
-        DocumentWithCount(document=row[0], chunk_count=int(row[1] or 0)) for row in rows
+        DocumentWithCount(
+            document=row[0],
+            chunk_count=int(row[1] or 0),
+            latest_job=latest_jobs.get(row[0].id),
+        )
+        for row in rows
     ]
     return documents, total_count
 
@@ -334,7 +350,44 @@ async def get_document(
     if row is None:
         raise DocumentNotFoundError("Document not found")
 
-    return DocumentWithCount(document=row[0], chunk_count=int(row[1] or 0))
+    latest_jobs = await _latest_jobs_by_document(session, document_ids=[row[0].id])
+    return DocumentWithCount(
+        document=row[0],
+        chunk_count=int(row[1] or 0),
+        latest_job=latest_jobs.get(row[0].id),
+    )
+
+
+async def _latest_jobs_by_document(
+    session: AsyncSession,
+    *,
+    document_ids: list[uuid.UUID],
+) -> dict[uuid.UUID, IngestionJobSummary]:
+    """Return one newest job per supplied document without ORM lazy loads.
+
+    Document list/detail calls already scope the documents to the authenticated user;
+    this helper only receives those IDs. Fetching the generation number in the same
+    query keeps the read model safe for SQLAlchemy's async session.
+    """
+    if not document_ids:
+        return {}
+
+    result = await session.execute(
+        select(IngestionJob, DocumentIngestionGeneration.generation_number)
+        .outerjoin(
+            DocumentIngestionGeneration,
+            DocumentIngestionGeneration.id == IngestionJob.generation_id,
+        )
+        .where(IngestionJob.document_id.in_(document_ids))
+        .order_by(IngestionJob.document_id, IngestionJob.created_at.desc())
+    )
+    latest: dict[uuid.UUID, IngestionJobSummary] = {}
+    for job, generation_number in result.all():
+        latest.setdefault(
+            job.document_id,
+            IngestionJobSummary(job=job, generation_number=generation_number),
+        )
+    return latest
 
 
 async def delete_document(

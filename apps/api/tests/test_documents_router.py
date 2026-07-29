@@ -65,7 +65,9 @@ def override_auth_and_db():
         app.dependency_overrides.clear()
 
 
-def _document_result(*, filename: str, collection_id: uuid.UUID | None = None):
+def _document_result(
+    *, filename: str, collection_id: uuid.UUID | None = None, latest_job=None
+):
     return types.SimpleNamespace(
         document=types.SimpleNamespace(
             id=uuid.uuid4(),
@@ -76,6 +78,7 @@ def _document_result(*, filename: str, collection_id: uuid.UUID | None = None):
             file_size=1024,
         ),
         chunk_count=0,
+        latest_job=latest_job,
     )
 
 
@@ -327,8 +330,20 @@ async def test_list_documents_happy_path(
     override_auth_and_db,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    job = types.SimpleNamespace(
+        job=types.SimpleNamespace(
+            id=uuid.uuid4(),
+            status=types.SimpleNamespace(value="processing"),
+            attempts=2,
+            error=None,
+            started_at=datetime.now(UTC),
+            completed_at=None,
+        ),
+        generation_number=3,
+    )
+
     async def _list(_session, **_kwargs):
-        return [_document_result(filename="notes.txt")], 1
+        return [_document_result(filename="notes.txt", latest_job=job)], 1
 
     monkeypatch.setattr(document_service, "list_documents", _list)
     response = await api_client.get("/api/v1/documents")
@@ -337,6 +352,15 @@ async def test_list_documents_happy_path(
     payload = response.json()
     assert payload["total"] == 1
     assert payload["documents"][0]["filename"] == "notes.txt"
+    assert payload["documents"][0]["latest_job"] == {
+        "id": str(job.job.id),
+        "status": "processing",
+        "attempts": 2,
+        "error": None,
+        "started_at": job.job.started_at.isoformat().replace("+00:00", "Z"),
+        "completed_at": None,
+        "generation": 3,
+    }
 
 
 @pytest.mark.asyncio
@@ -352,6 +376,63 @@ async def test_list_documents_collection_not_found(
     response = await api_client.get(f"/api/v1/documents?collection_id={uuid.uuid4()}")
 
     assert response.status_code == 404
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status", "error", "completed", "generation"),
+    [
+        ("ready", None, True, 1),
+        ("failed", "embedding provider unavailable", True, 2),
+    ],
+)
+async def test_list_documents_serializes_terminal_latest_job_states(
+    api_client: AsyncClient,
+    override_auth_and_db,
+    monkeypatch: pytest.MonkeyPatch,
+    status: str,
+    error: str | None,
+    completed: bool,
+    generation: int,
+) -> None:
+    now = datetime.now(UTC)
+    latest_job = types.SimpleNamespace(
+        job=types.SimpleNamespace(
+            id=uuid.uuid4(),
+            status=types.SimpleNamespace(value=status),
+            attempts=1,
+            error=error,
+            started_at=now,
+            completed_at=now if completed else None,
+        ),
+        generation_number=generation,
+    )
+
+    async def _list(_session, **_kwargs):
+        return [_document_result(filename="notes.txt", latest_job=latest_job)], 1
+
+    monkeypatch.setattr(document_service, "list_documents", _list)
+    response = await api_client.get("/api/v1/documents")
+
+    assert response.status_code == 200
+    assert response.json()["documents"][0]["latest_job"]["status"] == status
+    assert response.json()["documents"][0]["latest_job"]["error"] == error
+
+
+@pytest.mark.asyncio
+async def test_list_documents_preserves_null_latest_job_for_legacy_documents(
+    api_client: AsyncClient,
+    override_auth_and_db,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def _list(_session, **_kwargs):
+        return [_document_result(filename="legacy.txt")], 1
+
+    monkeypatch.setattr(document_service, "list_documents", _list)
+    response = await api_client.get("/api/v1/documents")
+
+    assert response.status_code == 200
+    assert response.json()["documents"][0]["latest_job"] is None
 
 
 @pytest.mark.asyncio

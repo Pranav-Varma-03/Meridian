@@ -42,6 +42,7 @@ describe("Meridian API contract handling", () => {
       created_at: "2026-07-29T10:00:00Z",
       chunk_count: 8,
       file_size: 128,
+      latest_job: null,
     });
 
     expect(document.collectionId).toBeNull();

@@ -46,6 +46,16 @@ ALLOWED_MIME_TYPES = {
 }
 
 
+class DocumentLatestJobResponse(BaseModel):
+    id: str
+    status: str
+    attempts: int
+    error: str | None
+    started_at: datetime | None
+    completed_at: datetime | None
+    generation: int | None
+
+
 class DocumentResponse(BaseModel):
     id: str
     filename: str
@@ -54,6 +64,7 @@ class DocumentResponse(BaseModel):
     created_at: datetime
     chunk_count: int | None = None
     file_size: int
+    latest_job: "DocumentLatestJobResponse | None" = None
 
     model_config = ConfigDict(
         json_schema_extra={
@@ -65,6 +76,15 @@ class DocumentResponse(BaseModel):
                 "created_at": "2026-04-08T09:30:00Z",
                 "chunk_count": None,
                 "file_size": 204800,
+                "latest_job": {
+                    "id": "5f578c6e-a922-4f07-8f13-eb5f62ce17bd",
+                    "status": "processing",
+                    "attempts": 1,
+                    "error": None,
+                    "started_at": "2026-04-08T09:31:00Z",
+                    "completed_at": None,
+                    "generation": 1,
+                },
             }
         }
     )
@@ -81,6 +101,23 @@ class DocumentListResponse(BaseModel):
                 "total": 0,
             }
         }
+    )
+
+
+def _latest_job_response(
+    item: document_service.DocumentWithCount,
+) -> DocumentLatestJobResponse | None:
+    if item.latest_job is None:
+        return None
+    job = item.latest_job.job
+    return DocumentLatestJobResponse(
+        id=str(job.id),
+        status=job.status.value,
+        attempts=job.attempts,
+        error=job.error,
+        started_at=job.started_at,
+        completed_at=job.completed_at,
+        generation=item.latest_job.generation_number,
     )
 
 
@@ -309,6 +346,7 @@ async def list_documents(
                 created_at=item.document.created_at,
                 chunk_count=item.chunk_count,
                 file_size=item.document.file_size,
+                latest_job=_latest_job_response(item),
             )
             for item in documents
         ],
@@ -356,6 +394,7 @@ async def get_document(
         created_at=result.document.created_at,
         chunk_count=result.chunk_count,
         file_size=result.document.file_size,
+        latest_job=_latest_job_response(result),
     )
 
 
