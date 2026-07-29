@@ -64,7 +64,8 @@ At minimum, configure:
   - `AUTH0_CLIENT_SECRET`
   - `AUTH0_SECRET`
 - `APP_BASE_URL`
-- `API_BASE_URL` (for web → api server-side calls, e.g. `http://localhost:8000`)
+- `API_BASE_URL` (for Next.js server → API calls, e.g. `http://localhost:8000`; do not
+  expose it as `NEXT_PUBLIC_API_BASE_URL`)
 
 `OPENAI_API_KEY` is required only when `EMBEDDING_PROVIDER=openai` or when using
 OpenAI-backed contextual chunking. Grounded `POST /api/v1/chat` uses OpenRouter and
@@ -72,6 +73,26 @@ requires `OPENROUTER_API_KEY`.
 
 The web app reads Auth0 values from the same root `.env` file.
 No `.env.local` is required for the current setup.
+
+### 2.1) Web API boundary
+
+The browser does not receive an Auth0 API bearer token. Authenticated browser requests
+use the same-origin Next.js BFF under `/api/meridian/*`; the BFF obtains the access
+token from the encrypted Auth0 server session, forwards only an allowlisted Meridian
+route, and proxies safe headers plus POST-SSE chat bytes without buffering. It rejects
+arbitrary upstream targets, browser-supplied `Authorization` headers, and cross-origin
+state-changing requests.
+
+Use these browser-facing paths in web features, not direct `API_BASE_URL` requests:
+
+- `/api/meridian/documents` and `/api/meridian/documents/upload`
+- `/api/meridian/collections`
+- `/api/meridian/ingest`
+- `/api/meridian/chat` and `/api/meridian/chat/conversations`
+
+The BFF preserves Meridian's JSON error envelope, `X-Request-ID`, and `Retry-After`.
+It is deliberately an allowlist rather than a generic proxy. Auth0's browser access
+token endpoint is disabled because Meridian uses this token-mediating backend pattern.
 
 ### 3) Embedding configuration
 
@@ -238,8 +259,8 @@ Important API token requirements:
 - The Next.js Auth0 v4 client explicitly requests this audience. Log out and log
   back in after changing it so the session receives a fresh access token.
 
-After login/signup, the web app calls `POST /api/v1/users/me` with the Auth0 access token.
-That endpoint verifies JWT and upserts the user into Postgres.
+After login/signup, the server-side web workspace calls `POST /api/v1/users/me` with
+the Auth0 access token. That endpoint verifies the JWT and upserts the user in Postgres.
 
 ### Development token-claims diagnostic
 
@@ -504,6 +525,7 @@ What runs on each commit:
 - Backend format: `ruff format`
 - Backend tests: `pytest -q`
 - Frontend typecheck: `pnpm --filter @meridian/web typecheck`
+- Frontend tests: `pnpm --filter @meridian/web test`
 
 Setup (one-time per clone):
 
