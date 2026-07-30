@@ -4,7 +4,7 @@ import type { CollectionListResponse, CollectionResponse } from "@meridian/share
 import { FormEvent, useState } from "react";
 import useSWR from "swr";
 
-import { ApiFeedback, EmptyState, LoadingState } from "@/components/app-feedback";
+import { ApiFeedback, AsyncButton, EmptyState, ListSkeleton, StatusRegion } from "@/components/app-feedback";
 import { ConfirmDialog } from "@/components/confirm-dialog";
 import { Pagination } from "@/components/pagination";
 import { meridianKeys, meridianRequest } from "@/lib/api/client";
@@ -15,7 +15,8 @@ export function CollectionManager() {
   const [page, setPage] = useState(1);
   const collections = useSWR<CollectionListResponse>(
     `${meridianKeys.collections}?limit=${PAGE_SIZE}&offset=${(page - 1) * PAGE_SIZE}`,
-    meridianRequest
+    meridianRequest,
+    { keepPreviousData: true }
   );
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
@@ -24,10 +25,15 @@ export function CollectionManager() {
   const [pendingDelete, setPendingDelete] = useState<CollectionResponse | null>(null);
   const [pendingRename, setPendingRename] = useState<CollectionResponse | null>(null);
   const [renameName, setRenameName] = useState("");
+  const [creating, setCreating] = useState(false);
+  const [renaming, setRenaming] = useState(false);
+  const [deleting, setDeleting] = useState(false);
 
   async function create(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (creating) return;
     setError(null);
+    setCreating(true);
     try {
       await meridianRequest<CollectionResponse>(meridianKeys.collections, {
         method: "POST",
@@ -40,15 +46,19 @@ export function CollectionManager() {
       await collections.mutate();
     } catch (requestError) {
       setError(requestError);
+    } finally {
+      setCreating(false);
     }
   }
   async function rename() {
-    if (!pendingRename) return;
+    if (!pendingRename || renaming) return;
     const nextName = renameName.trim();
     if (!nextName) {
       setError(new Error("Collection name is required."));
       return;
     }
+    setError(null);
+    setRenaming(true);
     try {
       await meridianRequest(`/api/meridian/collections/${pendingRename.id}`, {
         method: "PATCH",
@@ -60,18 +70,24 @@ export function CollectionManager() {
       await collections.mutate();
     } catch (requestError) {
       setError(requestError);
+    } finally {
+      setRenaming(false);
     }
   }
   async function confirmRemove() {
-    if (!pendingDelete) return;
+    if (!pendingDelete || deleting) return;
     const collection = pendingDelete;
-    setPendingDelete(null);
+    setError(null);
+    setDeleting(true);
     try {
       await meridianRequest(`/api/meridian/collections/${collection.id}`, { method: "DELETE" });
+      setPendingDelete(null);
       setNotice("Collection deleted; its documents are now unfiled.");
       await collections.mutate();
     } catch (requestError) {
       setError(requestError);
+    } finally {
+      setDeleting(false);
     }
   }
   return (
@@ -102,10 +118,18 @@ export function CollectionManager() {
           onChange={(event) => setDescription(event.target.value)}
           placeholder="Optional description"
         />
-        <button className="rounded bg-primary px-3 py-2 text-primary-foreground" type="submit">
+        <AsyncButton
+          className="rounded bg-primary px-3 py-2 text-primary-foreground disabled:cursor-not-allowed disabled:opacity-50"
+          pending={creating}
+          pendingLabel="Creating…"
+          type="submit"
+        >
           Create
-        </button>
+        </AsyncButton>
       </form>
+      <StatusRegion>
+        {creating ? "Creating collection" : renaming ? "Saving collection name" : deleting ? "Deleting collection" : ""}
+      </StatusRegion>
       {notice ? (
         <p role="status" className="mt-4 rounded bg-muted p-3 text-sm">
           {notice}
@@ -124,7 +148,7 @@ export function CollectionManager() {
       ) : null}
       <div className="mt-8">
         {collections.isLoading ? (
-          <LoadingState label="Loading collections…" />
+          <ListSkeleton label="Loading collections…" />
         ) : collections.error ? (
           <ApiFeedback error={collections.error} onRetry={() => void collections.mutate()} />
         ) : (collections.data?.collections.length ?? 0) === 0 ? (
@@ -178,15 +202,17 @@ export function CollectionManager() {
               onPageChange={setPage}
               pageSize={PAGE_SIZE}
               total={collections.data?.total ?? 0}
+              pending={collections.isValidating}
             />
           </>
         )}
       </div>
       <ConfirmDialog
-        confirmLabel="Save name"
+        confirmLabel={renaming ? "Saving…" : "Save name"}
         onCancel={() => setPendingRename(null)}
         onConfirm={() => void rename()}
         open={Boolean(pendingRename)}
+        pending={renaming}
         title="Rename collection"
       >
         <label className="grid gap-1 text-sm font-medium">
@@ -201,10 +227,11 @@ export function CollectionManager() {
         </label>
       </ConfirmDialog>
       <ConfirmDialog
-        confirmLabel="Delete collection"
+        confirmLabel={deleting ? "Deleting…" : "Delete collection"}
         onCancel={() => setPendingDelete(null)}
         onConfirm={() => void confirmRemove()}
         open={Boolean(pendingDelete)}
+        pending={deleting}
         title="Delete collection?"
       >
         {pendingDelete

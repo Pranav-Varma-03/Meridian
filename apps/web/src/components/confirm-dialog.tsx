@@ -7,6 +7,7 @@ export function ConfirmDialog({
   title,
   children,
   confirmLabel = "Confirm",
+  pending = false,
   onCancel,
   onConfirm,
 }: {
@@ -14,6 +15,7 @@ export function ConfirmDialog({
   title: string;
   children: React.ReactNode;
   confirmLabel?: string;
+  pending?: boolean;
   onCancel: () => void;
   onConfirm: () => void;
 }) {
@@ -21,19 +23,25 @@ export function ConfirmDialog({
   const confirm = useRef<HTMLButtonElement>(null);
   const trigger = useRef<HTMLElement | null>(null);
   const cancelAction = useRef(onCancel);
+  const pendingAction = useRef(pending);
   useEffect(() => {
     cancelAction.current = onCancel;
   }, [onCancel]);
+  useEffect(() => {
+    pendingAction.current = pending;
+  }, [pending]);
   useEffect(() => {
     if (!open) return;
     trigger.current = document.activeElement as HTMLElement;
     cancel.current?.focus();
     const key = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
+        if (pendingAction.current) return;
         event.preventDefault();
         cancelAction.current();
       }
       if (event.key === "Tab") {
+        if (pendingAction.current) return;
         const movingBackwards = event.shiftKey;
         if (
           (movingBackwards && document.activeElement === cancel.current) ||
@@ -68,7 +76,8 @@ export function ConfirmDialog({
         </div>
         <div className="mt-5 flex flex-wrap justify-end gap-2">
           <button
-            className="rounded border border-border px-3 py-2"
+            className="rounded border border-border px-3 py-2 disabled:cursor-not-allowed disabled:opacity-50"
+            disabled={pending}
             onClick={onCancel}
             ref={cancel}
             type="button"
@@ -76,7 +85,9 @@ export function ConfirmDialog({
             Cancel
           </button>
           <button
-            className="rounded bg-primary px-3 py-2 text-primary-foreground"
+            aria-busy={pending || undefined}
+            className="rounded bg-primary px-3 py-2 text-primary-foreground disabled:cursor-not-allowed disabled:opacity-50"
+            disabled={pending}
             onClick={onConfirm}
             ref={confirm}
             type="button"

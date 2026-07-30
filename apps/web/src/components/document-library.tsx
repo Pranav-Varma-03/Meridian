@@ -11,7 +11,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useDropzone } from "react-dropzone";
 import useSWR from "swr";
 
-import { ApiFeedback, EmptyState, LoadingState } from "@/components/app-feedback";
+import { ApiFeedback, EmptyState, ListSkeleton, StatusRegion } from "@/components/app-feedback";
 import { ConfirmDialog } from "@/components/confirm-dialog";
 import { Pagination } from "@/components/pagination";
 import { meridianKeys, meridianRequest } from "@/lib/api/client";
@@ -37,9 +37,12 @@ export function DocumentLibrary({ canReingest }: { canReingest: boolean }) {
   const [notice, setNotice] = useState<string | null>(null);
   const [actionError, setActionError] = useState<unknown>(null);
   const [pendingDelete, setPendingDelete] = useState<DocumentResponse | null>(null);
+  const [uploading, setUploading] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const [reingestingDocumentId, setReingestingDocumentId] = useState<string | null>(null);
   const [pollCount, setPollCount] = useState(0);
   const documentsKey = `${meridianKeys.documents(collectionId || undefined)}${collectionId ? "&" : "?"}limit=${PAGE_SIZE}&offset=${(page - 1) * PAGE_SIZE}`;
-  const documents = useSWR<DocumentListResponse>(documentsKey, meridianRequest);
+  const documents = useSWR<DocumentListResponse>(documentsKey, meridianRequest, { keepPreviousData: true });
   const collections = useSWR<CollectionListResponse>(meridianKeys.collections, meridianRequest);
   const active = hasActiveIngestion(documents.data?.documents ?? []);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -64,6 +67,7 @@ export function DocumentLibrary({ canReingest }: { canReingest: boolean }) {
 
   const upload = useCallback(
     async (file: File) => {
+      if (uploading) return;
       const validationError = uploadValidationMessage(file);
       if (validationError) {
         setActionError(new Error(validationError));
@@ -71,6 +75,9 @@ export function DocumentLibrary({ canReingest }: { canReingest: boolean }) {
       }
       const data = new FormData();
       data.set("file", file);
+      setActionError(null);
+      setNotice(`Uploading ${file.name}…`);
+      setUploading(true);
       try {
         const path = `/api/meridian/documents/upload${collectionId ? `?collection_id=${encodeURIComponent(collectionId)}` : ""}`;
         const response = await fetch(path, { method: "POST", body: data });
@@ -86,9 +93,12 @@ export function DocumentLibrary({ canReingest }: { canReingest: boolean }) {
         await documents.mutate();
       } catch (error) {
         setActionError(error);
+        setNotice(null);
+      } finally {
+        setUploading(false);
       }
     },
-    [collectionId, documents]
+    [collectionId, documents, uploading]
   );
   const onDrop = useCallback(
     (files: File[]) => {
@@ -97,21 +107,34 @@ export function DocumentLibrary({ canReingest }: { canReingest: boolean }) {
     },
     [upload]
   );
-  const dropzone = useDropzone({ onDrop, multiple: false, accept: ACCEPTED_UPLOAD_TYPES });
+  const dropzone = useDropzone({
+    onDrop,
+    multiple: false,
+    accept: ACCEPTED_UPLOAD_TYPES,
+    disabled: uploading,
+  });
 
   async function confirmDeleteDocument() {
-    if (!pendingDelete) return;
+    if (!pendingDelete || deleting) return;
     const document = pendingDelete;
-    setPendingDelete(null);
+    setActionError(null);
+    setDeleting(true);
     try {
       await meridianRequest(`/api/meridian/documents/${document.id}`, { method: "DELETE" });
+      setPendingDelete(null);
       setNotice("Document removed. Cleanup has been queued.");
       await documents.mutate();
     } catch (error) {
       setActionError(error);
+    } finally {
+      setDeleting(false);
     }
   }
   async function reingest(document: DocumentResponse, reason: ReingestionReason) {
+    if (reingestingDocumentId) return;
+    setActionError(null);
+    setReingestingDocumentId(document.id);
+    setNotice(`Queueing re-ingestion for ${document.filename}…`);
     try {
       await meridianRequest("/api/meridian/ingest", {
         method: "POST",
@@ -125,6 +148,9 @@ export function DocumentLibrary({ canReingest }: { canReingest: boolean }) {
       await documents.mutate();
     } catch (error) {
       setActionError(error);
+      setNotice(null);
+    } finally {
+      setReingestingDocumentId(null);
     }
   }
 
@@ -162,10 +188,13 @@ export function DocumentLibrary({ canReingest }: { canReingest: boolean }) {
       </div>
       <div
         {...dropzone.getRootProps()}
-        className="mt-6 cursor-pointer rounded-lg border border-dashed border-primary/50 bg-card p-8 text-center"
+        aria-disabled={uploading}
+        className={`mt-6 rounded-lg border border-dashed border-primary/50 bg-card p-8 text-center ${uploading ? "cursor-wait opacity-70" : "cursor-pointer"}`}
       >
         <input {...dropzone.getInputProps()} />
-        <p className="font-medium">Drop a PDF, DOCX, or TXT file here, or choose a file</p>
+        <p className="font-medium">
+          {uploading ? "Uploading file…" : "Drop a PDF, DOCX, or TXT file here, or choose a file"}
+        </p>
         <p className="mt-1 text-sm text-muted-foreground">
           Maximum size: 10 MiB.{" "}
           {collectionId ? "The selected collection will be assigned." : "It will be left unfiled."}
@@ -176,6 +205,15 @@ export function DocumentLibrary({ canReingest }: { canReingest: boolean }) {
           {notice}
         </p>
       ) : null}
+      <StatusRegion>
+        {uploading
+          ? "Uploading file"
+          : reingestingDocumentId
+            ? "Queueing document re-ingestion"
+            : deleting
+              ? "Deleting document"
+              : ""}
+      </StatusRegion>
       {actionError ? (
         <div className="mt-4">
           <ApiFeedback
@@ -189,7 +227,7 @@ export function DocumentLibrary({ canReingest }: { canReingest: boolean }) {
       ) : null}
       <div className="mt-8">
         {documents.isLoading ? (
-          <LoadingState label="Loading documents…" />
+          <ListSkeleton label="Loading documents…" />
         ) : documents.error ? (
           <ApiFeedback error={documents.error} onRetry={() => void refreshDocuments()} />
         ) : (documents.data?.documents.length ?? 0) === 0 ? (
@@ -203,12 +241,14 @@ export function DocumentLibrary({ canReingest }: { canReingest: boolean }) {
               canReingest={canReingest}
               onDelete={setPendingDelete}
               onReingest={reingest}
+              reingestingDocumentId={reingestingDocumentId}
             />
             <Pagination
               currentPage={page}
               onPageChange={setPage}
               pageSize={PAGE_SIZE}
               total={documents.data?.total ?? 0}
+              pending={documents.isValidating}
             />
           </>
         )}
@@ -219,10 +259,11 @@ export function DocumentLibrary({ canReingest }: { canReingest: boolean }) {
         </p>
       ) : null}
       <ConfirmDialog
-        confirmLabel="Delete document"
+        confirmLabel={deleting ? "Deleting…" : "Delete document"}
         onCancel={() => setPendingDelete(null)}
         onConfirm={() => void confirmDeleteDocument()}
         open={Boolean(pendingDelete)}
+        pending={deleting}
         title="Delete document?"
       >
         {pendingDelete
@@ -238,11 +279,13 @@ function DocumentTable({
   canReingest,
   onDelete,
   onReingest,
+  reingestingDocumentId,
 }: {
   documents: DocumentResponse[];
   canReingest: boolean;
   onDelete: (document: DocumentResponse) => void;
   onReingest: (document: DocumentResponse, reason: ReingestionReason) => void;
+  reingestingDocumentId: string | null;
 }) {
   return (
     <div className="overflow-x-auto rounded-lg border border-border">
@@ -290,6 +333,7 @@ function DocumentTable({
                       aria-label={`Re-ingest ${document.filename}`}
                       className="rounded border border-border px-2 py-1"
                       defaultValue=""
+                      disabled={reingestingDocumentId !== null}
                       onChange={(event) => {
                         const value = event.target.value as ReingestionReason;
                         if (value) {
@@ -298,7 +342,9 @@ function DocumentTable({
                         }
                       }}
                     >
-                      <option value="">Re-ingest…</option>
+                      <option value="">
+                        {reingestingDocumentId === document.id ? "Queueing…" : "Re-ingest…"}
+                      </option>
                       {reasons.map((reason) => (
                         <option key={reason.value} value={reason.value}>
                           {reason.label}

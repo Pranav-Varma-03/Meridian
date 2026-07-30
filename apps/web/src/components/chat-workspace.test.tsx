@@ -21,7 +21,18 @@ afterEach(() => {
   cleanup();
   vi.unstubAllGlobals();
   vi.clearAllMocks();
+  streamChat.mockReset();
 });
+
+function deferred<T>() {
+  let resolve: (value: T) => void;
+  let reject: (reason?: unknown) => void;
+  const promise = new Promise<T>((nextResolve, nextReject) => {
+    resolve = nextResolve;
+    reject = nextReject;
+  });
+  return { promise, resolve: resolve!, reject: reject! };
+}
 
 describe("ChatWorkspace", () => {
   it("directs an empty library to document upload instead of allowing chat submission", async () => {
@@ -82,6 +93,32 @@ describe("ChatWorkspace", () => {
     renderWorkspace(<ChatWorkspace conversationId={conversationId} />);
     expect(await screen.findByText(/Selected collections/)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Product ×" })).toBeInTheDocument();
+  });
+
+  it("preserves the composer and shows a transcript-shaped fallback while conversation detail loads", async () => {
+    const conversationId = "11111111-1111-4111-8111-111111111112";
+    const detail = deferred<Response>();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: RequestInfo | URL) => {
+        if (String(input).includes(`/conversations/${conversationId}`)) return detail.promise;
+        return Promise.resolve(Response.json({ collections: [], total: 0 }));
+      })
+    );
+
+    renderWorkspace(<ChatWorkspace conversationId={conversationId} />);
+    expect(await screen.findByRole("status", { name: "Loading conversation…" })).toBeInTheDocument();
+    expect(screen.getByLabelText("Chat message")).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Send" })).toBeDisabled();
+  });
+
+  it("makes collection scope loading visible and prevents scope edits until choices resolve", async () => {
+    const collections = deferred<Response>();
+    vi.stubGlobal("fetch", vi.fn(() => collections.promise));
+
+    renderWorkspace(<ChatWorkspace />);
+    expect(await screen.findByText("Loading available collections…")).toBeInTheDocument();
+    expect(screen.getByLabelText("Add collection to chat scope")).toBeDisabled();
   });
 
   it("prepends older cursor history without replacing the newest page", async () => {
@@ -152,5 +189,80 @@ describe("ChatWorkspace", () => {
     await waitFor(() =>
       expect(replace).toHaveBeenCalledWith("/chat/22222222-2222-4222-8222-222222222222")
     );
+  });
+
+  it("keeps a provisional assistant response stable until streamed text arrives and then completes", async () => {
+    const stream = deferred<void>();
+    let handlers: { onEvent: (event: any) => void } | null = null;
+    streamChat.mockImplementation(async (_request: unknown, nextHandlers: { onEvent: (event: any) => void }) => {
+      handlers = nextHandlers;
+      await stream.promise;
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => Response.json({ collections: [{ id: "collection-1", name: "Product", description: null, document_count: 1, created_at: "2026-07-30T00:00:00Z" }], total: 1 }))
+    );
+
+    renderWorkspace(<ChatWorkspace />);
+    fireEvent.change(await screen.findByLabelText("Chat message"), { target: { value: "What changed?" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+
+    expect(await screen.findByText("Searching your documents…")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Searching…" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Stop" })).toBeInTheDocument();
+    handlers!.onEvent({ type: "sources", content: [] });
+    expect(screen.getByText("Searching your documents…")).toBeInTheDocument();
+    handlers!.onEvent({ type: "text", content: "A grounded answer." });
+    expect(await screen.findByText("A grounded answer.")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Generating…" })).toBeDisabled();
+    handlers!.onEvent({ type: "done", conversation_id: "22222222-2222-4222-8222-222222222222", retrieval_scope: { mode: "all", collection_ids: [], version: 1 } });
+    stream.resolve();
+
+    await waitFor(() => expect(screen.getByLabelText("Chat message")).toBeEnabled());
+    expect(screen.getByText("Meridian response complete.")).toBeInTheDocument();
+  });
+
+  it("marks a stopped response as retryable and restores its submitted query", async () => {
+    const stream = deferred<void>();
+    streamChat.mockImplementation(async () => stream.promise);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => Response.json({ collections: [{ id: "collection-1", name: "Product", description: null, document_count: 1, created_at: "2026-07-30T00:00:00Z" }], total: 1 }))
+    );
+
+    renderWorkspace(<ChatWorkspace />);
+    fireEvent.change(await screen.findByLabelText("Chat message"), { target: { value: "Retry this question" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await screen.findByText("Searching your documents…");
+    fireEvent.click(screen.getByRole("button", { name: "Stop" }));
+
+    expect(await screen.findByText(/Meridian · stopped/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Retry last question" }));
+    expect(screen.getByLabelText("Chat message")).toHaveValue("Retry this question");
+    stream.reject(new DOMException("Aborted", "AbortError"));
+  });
+
+  it("keeps a failed response retryable when the stream reports an error", async () => {
+    const stream = deferred<void>();
+    let handlers: { onEvent: (event: any) => void } | null = null;
+    streamChat.mockImplementation(async (_request: unknown, nextHandlers: { onEvent: (event: any) => void }) => {
+      handlers = nextHandlers;
+      await stream.promise;
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => Response.json({ collections: [{ id: "collection-1", name: "Product", description: null, document_count: 1, created_at: "2026-07-30T00:00:00Z" }], total: 1 }))
+    );
+
+    renderWorkspace(<ChatWorkspace />);
+    fireEvent.change(await screen.findByLabelText("Chat message"), { target: { value: "Retry failed question" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await screen.findByText("Searching your documents…");
+    handlers!.onEvent({ type: "error", message: "Stream failed" });
+    stream.resolve();
+
+    expect(await screen.findByRole("button", { name: "Retry last question" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Retry last question" }));
+    expect(screen.getByLabelText("Chat message")).toHaveValue("Retry failed question");
   });
 });

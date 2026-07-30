@@ -4,7 +4,7 @@ import type { ConversationSummary } from "@meridian/shared";
 import Link from "next/link";
 import useSWR from "swr";
 
-import { ApiFeedback, EmptyState, LoadingState } from "@/components/app-feedback";
+import { ApiFeedback, EmptyState, ListSkeleton } from "@/components/app-feedback";
 import { Pagination } from "@/components/pagination";
 import { meridianKeys, meridianRequest } from "@/lib/api/client";
 import { useState } from "react";
@@ -15,7 +15,8 @@ export function ChatsIndex() {
   const [page, setPage] = useState(1);
   const history = useSWR<{ conversations: ConversationSummary[]; total: number }>(
     `${meridianKeys.conversations}?limit=${PAGE_SIZE}&offset=${(page - 1) * PAGE_SIZE}`,
-    meridianRequest
+    meridianRequest,
+    { keepPreviousData: true }
   );
   return (
     <section className="mx-auto min-h-full max-w-6xl px-4 py-8 sm:px-8">
@@ -30,7 +31,7 @@ export function ChatsIndex() {
       </header>
       <div className="mt-8">
         {history.isLoading ? (
-          <LoadingState label="Loading chats…" />
+          <ListSkeleton label="Loading chats…" />
         ) : history.error ? (
           <ApiFeedback error={history.error} onRetry={() => void history.mutate()} />
         ) : !history.data?.conversations.length ? (
@@ -64,6 +65,7 @@ export function ChatsIndex() {
               onPageChange={setPage}
               pageSize={PAGE_SIZE}
               total={history.data.total}
+              pending={history.isValidating}
             />
           </>
         )}

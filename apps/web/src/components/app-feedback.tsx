@@ -1,6 +1,6 @@
 "use client";
 
-import type { ReactNode } from "react";
+import type { ButtonHTMLAttributes, ReactNode } from "react";
 
 import { isMeridianApiError } from "@/lib/api/client";
 import type { MeridianApiError } from "@/lib/api/contracts";
@@ -11,6 +11,28 @@ export function LoadingState({ label = "Loading Meridian…" }: { label?: string
       {label}
     </div>
   );
+}
+
+export function ListSkeleton({ rows = 5, label = "Loading items…" }: { rows?: number; label?: string }) {
+  return <div aria-busy="true" aria-label={label} className="space-y-3" role="status">
+    {Array.from({ length: rows }, (_, index) => <div aria-hidden="true" className="h-16 animate-pulse rounded-lg border border-border bg-card motion-reduce:animate-none" key={index} />)}
+    <span className="sr-only">{label}</span>
+  </div>;
+}
+
+export function TranscriptSkeleton() {
+  return <div aria-busy="true" aria-label="Loading conversation…" className="space-y-4" role="status">
+    {["w-2/3", "ml-auto w-1/2", "w-3/4", "ml-auto w-2/5"].map((width, index) => <div aria-hidden="true" className={`h-20 animate-pulse rounded-lg border border-border bg-card motion-reduce:animate-none ${width}`} key={index} />)}
+    <span className="sr-only">Loading conversation…</span>
+  </div>;
+}
+
+export function AsyncButton({ pending, pendingLabel, children, disabled, ...props }: ButtonHTMLAttributes<HTMLButtonElement> & { pending?: boolean; pendingLabel: string }) {
+  return <button {...props} aria-busy={pending || undefined} disabled={disabled || pending}>{pending ? pendingLabel : children}</button>;
+}
+
+export function StatusRegion({ children }: { children: ReactNode }) {
+  return <p aria-atomic="true" aria-live="polite" className="sr-only" role="status">{children}</p>;
 }
 
 export function EmptyState({

@@ -38,7 +38,47 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+function deferred<T>() {
+  let resolve: (value: T) => void;
+  const promise = new Promise<T>((nextResolve) => {
+    resolve = nextResolve;
+  });
+  return { promise, resolve: resolve! };
+}
+
 describe("document-library workspace", () => {
+  it("shows an upload phase immediately and waits for the server job status after acceptance", async () => {
+    const upload = deferred<Response>();
+    const queuedDocument = {
+      ...document,
+      status: "queued" as const,
+      latest_job: { ...document.latest_job, status: "queued" as const },
+    };
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input);
+      if (path.includes("/documents/upload")) return upload.promise;
+      if (path.includes("/documents")) return Promise.resolve(Response.json({ documents: [queuedDocument], total: 1 }));
+      return Promise.resolve(Response.json({ collections: [], total: 0 }));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { container } = renderWithFreshCache(<DocumentLibrary canReingest={false} />);
+    await screen.findByText("Queued");
+    const input = container.querySelector<HTMLInputElement>('input[type="file"]');
+    expect(input).not.toBeNull();
+    fireEvent.change(input!, { target: { files: [new File(["contents"], "handbook.pdf", { type: "application/pdf" })] } });
+
+    expect(await screen.findByText("Uploading file…")).toBeInTheDocument();
+    expect(input?.parentElement).toHaveAttribute("aria-disabled", "true");
+    upload.resolve(
+      Response.json(
+        { job_id: "job", document_id: document.id, filename: "handbook.pdf", status: "queued", deduplicated: false, reused_existing_job: false, message: "Accepted" },
+        { status: 202 }
+      )
+    );
+    expect(await screen.findByText("Upload accepted. Processing continues in the background.")).toBeInTheDocument();
+  });
+
   it("sends the fixed re-ingestion reason through the BFF only when the capability is present", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const path = String(input);
@@ -63,6 +103,35 @@ describe("document-library workspace", () => {
         })
       )
     );
+  });
+
+  it("locks re-ingestion while queue acceptance is pending and then shows the server job state", async () => {
+    const ingestion = deferred<Response>();
+    const queuedDocument = {
+      ...document,
+      status: "queued" as const,
+      latest_job: { ...document.latest_job, status: "queued" as const },
+    };
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input);
+      if (path.endsWith("/ingest")) return ingestion.promise;
+      if (path.includes("/documents")) return Promise.resolve(Response.json({ documents: [queuedDocument], total: 1 }));
+      return Promise.resolve(Response.json({ collections: [], total: 0 }));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    renderWithFreshCache(<DocumentLibrary canReingest />);
+    const reason = await screen.findByLabelText("Re-ingest handbook.pdf");
+    fireEvent.change(reason, { target: { value: "manual_repair" } });
+
+    expect(await screen.findByText("Queueing re-ingestion for handbook.pdf…")).toBeInTheDocument();
+    expect(reason).toBeDisabled();
+    fireEvent.change(reason, { target: { value: "chunking_change" } });
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+
+    ingestion.resolve(Response.json({ job_id: "job", status: "queued" }, { status: 202 }));
+    expect(await screen.findByText(/Re-ingestion queued/)).toBeInTheDocument();
+    expect(await screen.findByText("Queued")).toBeInTheDocument();
   });
 
   it("creates collections through the BFF and surfaces the mutation result", async () => {
@@ -127,6 +196,36 @@ describe("document-library workspace", () => {
     expect(screen.queryByRole("dialog", { name: "Rename collection" })).not.toBeInTheDocument();
   });
 
+  it("keeps a rename dialog and its input available after an API error", async () => {
+    const collection = {
+      id: "collection-1",
+      name: "Old name",
+      description: null,
+      document_count: 0,
+      created_at: "2026-07-29T10:00:00Z",
+    };
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      if (init?.method === "PATCH") {
+        return Response.json(
+          { error: { code: "CONFLICT", message: "Name is already in use" } },
+          { status: 409 }
+        );
+      }
+      return Response.json({ collections: [collection], total: 1 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    renderWithFreshCache(<CollectionManager />);
+    fireEvent.click(await screen.findByRole("button", { name: "Rename" }));
+    const nameInput = screen.getByLabelText("New collection name");
+    fireEvent.change(nameInput, { target: { value: "New name" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save name" }));
+
+    expect(await screen.findByText("Name is already in use")).toBeInTheDocument();
+    expect(screen.getByRole("dialog", { name: "Rename collection" })).toBeInTheDocument();
+    expect(nameInput).toHaveValue("New name");
+  });
+
   it("waits for delete confirmation and only sends the lifecycle deletion after confirmation", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const path = String(input);
@@ -151,6 +250,28 @@ describe("document-library workspace", () => {
         expect.objectContaining({ method: "DELETE" })
       )
     );
+    await screen.findByText("Document removed. Cleanup has been queued.");
+  });
+
+  it("shows deleting and prevents duplicate document deletion while the request is pending", async () => {
+    const deletion = deferred<Response>();
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input);
+      if (init?.method === "DELETE") return deletion.promise;
+      if (path.includes("/documents")) return Promise.resolve(Response.json({ documents: [document], total: 1 }));
+      return Promise.resolve(Response.json({ collections: [], total: 0 }));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    renderWithFreshCache(<DocumentLibrary canReingest={false} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Delete" }));
+    fireEvent.click(screen.getByRole("button", { name: "Delete document" }));
+
+    expect(await screen.findByRole("button", { name: "Deleting…" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Cancel" })).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "Deleting…" }));
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+
+    deletion.resolve(Response.json({ message: "Document deleted and cleanup queued" }));
     await screen.findByText("Document removed. Cleanup has been queued.");
   });
 });

@@ -14,7 +14,7 @@ import { useRouter } from "next/navigation";
 import { FormEvent, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import useSWR, { mutate as mutateCache } from "swr";
 
-import { ApiFeedback, EmptyState, LoadingState } from "@/components/app-feedback";
+import { ApiFeedback, EmptyState, StatusRegion, TranscriptSkeleton } from "@/components/app-feedback";
 import { ConfirmDialog } from "@/components/confirm-dialog";
 import { meridianKeys, meridianRequest } from "@/lib/api/client";
 import { streamChat } from "@/lib/chat/client";
@@ -22,8 +22,10 @@ import { streamChat } from "@/lib/chat/client";
 type LiveMessage = ConversationMessage & {
   provisional?: boolean;
   failed?: boolean;
+  stopped?: boolean;
   sources?: SourceCitation[];
 };
+type ChatPhase = "idle" | "submitting" | "retrieving" | "streaming" | "complete" | "stopped" | "failed";
 const allScope: RetrievalScopeResponse = { mode: "all", collection_ids: [], version: 0 };
 const HISTORY_PAGE_SIZE = 50;
 
@@ -34,11 +36,12 @@ export function ChatWorkspace({ conversationId }: { conversationId?: string }) {
   const [messages, setMessages] = useState<LiveMessage[]>([]);
   const [query, setQuery] = useState("");
   const [retryQuery, setRetryQuery] = useState<string | null>(null);
-  const [streaming, setStreaming] = useState(false);
+  const [phase, setPhase] = useState<ChatPhase>("idle");
   const [error, setError] = useState<unknown>(null);
-  const [streamAnnouncement, setStreamAnnouncement] = useState("");
+  const phaseRef = useRef<ChatPhase>("idle");
   const isNew = !conversationId;
   const aborter = useRef<AbortController | null>(null);
+  const activeQuery = useRef<string | null>(null);
   const transcript = useRef<HTMLDivElement | null>(null);
   const [nearLatest, setNearLatest] = useState(true);
   const [loadingOlder, setLoadingOlder] = useState(false);
@@ -53,6 +56,9 @@ export function ChatWorkspace({ conversationId }: { conversationId?: string }) {
     `${meridianKeys.collections}?limit=100&offset=0`,
     meridianRequest
   );
+  const streaming = ["submitting", "retrieving", "streaming"].includes(phase);
+  const scopeLoading = collections.isLoading;
+  const scopeUnavailable = Boolean(collections.error);
   const hasLibrary =
     (collections.data?.collections.reduce(
       (count, collection) => count + collection.document_count,
@@ -62,6 +68,11 @@ export function ChatWorkspace({ conversationId }: { conversationId?: string }) {
     () => new Map((collections.data?.collections ?? []).map((item) => [item.id, item.name])),
     [collections.data]
   );
+
+  function updatePhase(next: ChatPhase) {
+    phaseRef.current = next;
+    setPhase(next);
+  }
 
   useEffect(() => {
     if (detail.data) {
@@ -112,6 +123,7 @@ export function ChatWorkspace({ conversationId }: { conversationId?: string }) {
       : { mode: "all" };
   }
   function setCollectionIds(ids: string[]) {
+    if (scopeLoading || scopeUnavailable) return;
     setScope({
       mode: ids.length ? "collections" : "all",
       collection_ids: ids,
@@ -122,7 +134,7 @@ export function ChatWorkspace({ conversationId }: { conversationId?: string }) {
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const text = query.trim();
-    if (!text || streaming) return;
+    if (!text || streaming || scopeLoading || scopeUnavailable) return;
     if (!hasLibrary) {
       setError(new Error("Upload a document before starting a grounded conversation."));
       return;
@@ -150,9 +162,9 @@ export function ChatWorkspace({ conversationId }: { conversationId?: string }) {
     ]);
     setQuery("");
     setRetryQuery(null);
+    activeQuery.current = text;
     setError(null);
-    setStreamAnnouncement("Meridian is generating a response.");
-    setStreaming(true);
+    updatePhase("submitting");
     const controller = new AbortController();
     aborter.current = controller;
     const request: {
@@ -163,15 +175,18 @@ export function ChatWorkspace({ conversationId }: { conversationId?: string }) {
     if (conversationId) request.conversation_id = conversationId;
     if (!conversationId || scopeDirty) request.retrieval_scope = preferredScope();
     try {
+      updatePhase("retrieving");
       await streamChat(request, {
         signal: controller.signal,
         onEvent: (event) => {
-          if (event.type === "text")
+          if (event.type === "text") {
+            updatePhase("streaming");
             setMessages((current) =>
               current.map((item) =>
                 item.id === assistantId ? { ...item, content: item.content + event.content } : item
               )
             );
+          }
           if (event.type === "sources")
             setMessages((current) =>
               current.map((item) =>
@@ -182,17 +197,27 @@ export function ChatWorkspace({ conversationId }: { conversationId?: string }) {
             );
           if (event.type === "error") {
             setError(new Error(event.message));
-            setStreamAnnouncement("Meridian could not complete the response.");
+            updatePhase("failed");
+            setRetryQuery(text);
             setMessages((current) =>
-              current.map((item) => (item.id === assistantId ? { ...item, failed: true } : item))
+              current.map((item) =>
+                item.id === assistantId
+                  ? { ...item, failed: true, provisional: false }
+                  : item.id === userId
+                    ? { ...item, provisional: false }
+                    : item
+              )
             );
+            controller.abort();
           }
           if (event.type === "done") {
+            if (phaseRef.current === "stopped" || phaseRef.current === "failed") return;
             setScope((current) =>
               event.retrieval_scope.version >= current.version ? event.retrieval_scope : current
             );
             setScopeDirty(false);
-            setStreamAnnouncement("Meridian response complete.");
+            updatePhase("complete");
+            activeQuery.current = null;
             setMessages((current) =>
               current.map((item) =>
                 item.id === assistantId || item.id === userId
@@ -210,18 +235,38 @@ export function ChatWorkspace({ conversationId }: { conversationId?: string }) {
     } catch (reason) {
       if (!controller.signal.aborted) {
         setError(reason);
-        setStreamAnnouncement(
-          "Meridian could not complete the response. Your question is ready to retry."
-        );
+        updatePhase("failed");
+      } else if (phaseRef.current !== "complete") {
+        updatePhase("stopped");
       }
       setMessages((current) =>
-        current.map((item) => (item.id === assistantId ? { ...item, failed: true } : item))
+        current.map((item) =>
+          item.id === assistantId
+            ? { ...item, failed: true, provisional: false }
+            : item.id === userId
+              ? { ...item, provisional: false }
+              : item
+        )
       );
       setRetryQuery(text);
     } finally {
-      setStreaming(false);
       aborter.current = null;
     }
+  }
+  function stopStream() {
+    if (!streaming) return;
+    updatePhase("stopped");
+    setRetryQuery(activeQuery.current);
+    setMessages((current) =>
+      current.map((message) =>
+        message.role === "assistant" && message.provisional
+          ? { ...message, stopped: true, provisional: false }
+          : message.role === "user" && message.provisional
+            ? { ...message, provisional: false }
+            : message
+      )
+    );
+    aborter.current?.abort();
   }
   async function deleteConversation() {
     if (!conversationId) return;
@@ -242,11 +287,19 @@ export function ChatWorkspace({ conversationId }: { conversationId?: string }) {
     <section
       className={`flex min-w-0 flex-1 flex-col ${isNew ? "min-h-full justify-center px-4 pb-24" : "h-full min-h-0 overflow-hidden px-4 py-8 sm:px-8"}`}
     >
-      <p aria-live="polite" className="sr-only">
-        {streamAnnouncement}
-      </p>
+      <StatusRegion>{phaseAnnouncement(phase)}</StatusRegion>
       {detail.isLoading ? (
-        <LoadingState label="Loading conversation…" />
+        <div className="flex min-h-0 flex-1 flex-col">
+          <header className="mb-5 shrink-0">
+            <p className="text-sm font-medium text-primary">Conversation</p>
+            <h1 className="mt-2 text-3xl font-semibold tracking-tight">Loading conversation</h1>
+          </header>
+          <div className="min-h-0 flex-1 overflow-y-auto pr-1"><TranscriptSkeleton /></div>
+          <form className="mt-6 shrink-0 flex w-full flex-wrap gap-2" onSubmit={(event) => event.preventDefault()}>
+            <textarea aria-label="Chat message" className="min-h-14 min-w-0 flex-1 resize-y rounded-xl border border-border bg-background p-4" disabled placeholder="Loading conversation…" />
+            <button className="rounded-xl bg-primary px-4 py-2 text-primary-foreground disabled:opacity-50" disabled type="submit">Send</button>
+          </form>
+        </div>
       ) : detail.error ? (
         <div>
           <ApiFeedback error={detail.error} onRetry={() => void detail.mutate()} />
@@ -282,15 +335,27 @@ export function ChatWorkspace({ conversationId }: { conversationId?: string }) {
               />
             </div>
           ) : null}
+          {retryQuery && (phase === "failed" || phase === "stopped") ? (
+            <button
+              className="mx-auto mb-4 w-full max-w-3xl rounded border border-border px-3 py-2 text-sm"
+              onClick={() => setQuery(retryQuery)}
+              type="button"
+            >
+              Retry last question
+            </button>
+          ) : null}
           <ScopeControl
             collectionNames={collectionNames}
             collections={collections.data?.collections ?? []}
+            loading={scopeLoading}
+            unavailable={scopeUnavailable}
             scope={scope}
             setCollectionIds={setCollectionIds}
             compact={isNew}
           />
           <div
             className={`w-full ${isNew ? "mx-auto max-w-3xl" : "min-h-0 flex-1 space-y-4 overflow-y-auto pr-1"}`}
+            aria-busy={streaming || undefined}
             onScroll={(event) => {
               const element = event.currentTarget;
               setNearLatest(element.scrollHeight - element.scrollTop - element.clientHeight < 80);
@@ -307,7 +372,7 @@ export function ChatWorkspace({ conversationId }: { conversationId?: string }) {
                 {loadingOlder ? "Loading older messages…" : "Load older messages"}
               </button>
             ) : null}
-            {!hasLibrary && !messages.length ? (
+            {!scopeLoading && !scopeUnavailable && !hasLibrary && !messages.length ? (
               <EmptyState title="Upload a document to start">
                 Grounded chat needs ready documents.{" "}
                 <Link className="underline" href="/documents">
@@ -344,24 +409,30 @@ export function ChatWorkspace({ conversationId }: { conversationId?: string }) {
             <textarea
               aria-label="Chat message"
               className="min-h-14 max-h-40 min-w-0 flex-1 resize-y overflow-y-auto rounded-xl border border-border bg-background p-4"
-              disabled={streaming || !hasLibrary}
+              disabled={streaming || scopeLoading || scopeUnavailable || !hasLibrary}
               value={query}
               onChange={(event) => setQuery(event.target.value)}
               placeholder={
-                hasLibrary ? "Ask about your documents" : "Upload documents to enable chat"
+                scopeLoading
+                  ? "Loading available collections…"
+                  : scopeUnavailable
+                    ? "Collection choices are unavailable"
+                    : hasLibrary
+                      ? "Ask about your documents"
+                      : "Upload documents to enable chat"
               }
             />
             <button
               className="rounded-xl bg-primary px-4 py-2 text-primary-foreground disabled:opacity-50"
-              disabled={streaming || !query.trim() || !hasLibrary}
+              disabled={streaming || scopeLoading || scopeUnavailable || !query.trim() || !hasLibrary}
               type="submit"
             >
-              {streaming ? "Thinking…" : "Send"}
+              {streaming ? (phase === "streaming" ? "Generating…" : "Searching…") : "Send"}
             </button>
             {streaming ? (
               <button
                 className="rounded-xl border border-border px-3 py-2"
-                onClick={() => aborter.current?.abort()}
+                onClick={stopStream}
                 type="button"
               >
                 Stop
@@ -398,12 +469,16 @@ function ScopeControl({
   scope,
   setCollectionIds,
   compact,
+  loading,
+  unavailable,
 }: {
   collections: NonNullable<CollectionListResponse["collections"]>;
   collectionNames: Map<string, string>;
   scope: RetrievalScopeResponse;
   setCollectionIds: (ids: string[]) => void;
   compact: boolean;
+  loading: boolean;
+  unavailable: boolean;
 }) {
   const selected = scope.collection_ids;
   return (
@@ -413,9 +488,14 @@ function ScopeControl({
       <p className="text-sm font-medium">
         Retrieval scope: {scope.mode === "all" ? "All documents" : "Selected collections"}
       </p>
+      {loading ? <p className="mt-1 text-xs text-muted-foreground">Loading available collections…</p> : null}
+      {unavailable ? (
+        <p className="mt-1 text-xs text-muted-foreground">Collection choices are temporarily unavailable.</p>
+      ) : null}
       <select
         aria-label="Add collection to chat scope"
         className="mt-2 rounded border border-border p-2 text-sm"
+        disabled={loading || unavailable}
         value=""
         onChange={(event) => {
           const id = event.target.value;
@@ -436,6 +516,7 @@ function ScopeControl({
           {selected.map((id) => (
             <button
               className="rounded-full bg-muted px-2 py-1 text-xs"
+              disabled={loading || unavailable}
               key={id}
               onClick={() => setCollectionIds(selected.filter((item) => item !== id))}
               type="button"
@@ -443,7 +524,7 @@ function ScopeControl({
               {collectionNames.get(id) ?? "Unavailable collection"} ×
             </button>
           ))}
-          <button className="text-xs underline" onClick={() => setCollectionIds([])} type="button">
+          <button className="text-xs underline disabled:opacity-50" disabled={loading || unavailable} onClick={() => setCollectionIds([])} type="button">
             Clear to all documents
           </button>
         </div>
@@ -490,8 +571,13 @@ function MessageList({
               <p className="mb-2 text-xs font-medium uppercase text-muted-foreground">
                 {message.role === "user" ? "You" : "Meridian"}
                 {message.failed ? " · incomplete" : ""}
+                {message.stopped ? " · stopped" : ""}
               </p>
-              <p className="whitespace-pre-wrap">{message.content || "…"}</p>
+              {message.role === "assistant" && message.provisional && !message.content ? (
+                <p aria-busy="true" className="text-muted-foreground">Searching your documents…</p>
+              ) : (
+                <p className="whitespace-pre-wrap">{message.content || "…"}</p>
+              )}
               {message.role === "assistant" && message.sources ? (
                 <Sources sources={message.sources} />
               ) : null}
@@ -501,6 +587,15 @@ function MessageList({
       })}
     </>
   );
+}
+function phaseAnnouncement(phase: ChatPhase): string {
+  if (phase === "submitting") return "Sending your question.";
+  if (phase === "retrieving") return "Searching your documents.";
+  if (phase === "streaming") return "Meridian response is streaming.";
+  if (phase === "complete") return "Meridian response complete.";
+  if (phase === "stopped") return "Meridian response stopped. Your question is ready to retry.";
+  if (phase === "failed") return "Meridian could not complete the response. Your question is ready to retry.";
+  return "";
 }
 function Sources({ sources }: { sources: SourceCitation[] }) {
   if (!sources.length)

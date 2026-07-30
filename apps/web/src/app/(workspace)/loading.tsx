@@ -1,5 +1,5 @@
-import { LoadingState } from "@/components/app-feedback";
+import { TranscriptSkeleton } from "@/components/app-feedback";
 
 export default function WorkspaceLoading() {
-  return <main className="mx-auto max-w-6xl p-8"><LoadingState /></main>;
+  return <main className="mx-auto flex min-h-full max-w-6xl flex-col p-8"><TranscriptSkeleton /></main>;
 }
