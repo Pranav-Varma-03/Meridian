@@ -5,6 +5,7 @@ import { hasReingestionPermission } from "@/lib/api/permissions";
 
 export interface WorkspaceCapabilities {
   canReingest: boolean;
+  permissions: string[];
 }
 
 function decodeJwtPayload(token: string): Record<string, unknown> | null {
@@ -30,10 +31,10 @@ function decodeJwtPayload(token: string): Record<string, unknown> | null {
 export async function getWorkspaceCapabilities(): Promise<WorkspaceCapabilities> {
   try {
     const accessToken = await auth0.getAccessToken();
-    return {
-      canReingest: hasReingestionPermission(decodeJwtPayload(accessToken.token)),
-    };
+    const claims = decodeJwtPayload(accessToken.token);
+    const canReingest = hasReingestionPermission(claims);
+    return { canReingest, permissions: canReingest ? ["documents:reingest"] : [] };
   } catch {
-    return { canReingest: false };
+    return { canReingest: false, permissions: [] };
   }
 }

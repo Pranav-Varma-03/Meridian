@@ -6,6 +6,7 @@ import { useDropzone } from "react-dropzone";
 import useSWR from "swr";
 
 import { ApiFeedback, EmptyState, LoadingState } from "@/components/app-feedback";
+import { ConfirmDialog } from "@/components/confirm-dialog";
 import { Pagination } from "@/components/pagination";
 import { meridianKeys, meridianRequest } from "@/lib/api/client";
 import { ACCEPTED_UPLOAD_TYPES, hasActiveIngestion, statusLabel, uploadValidationMessage } from "@/lib/document-library";
@@ -24,6 +25,7 @@ export function DocumentLibrary({ canReingest }: { canReingest: boolean }) {
   const [page, setPage] = useState(1);
   const [notice, setNotice] = useState<string | null>(null);
   const [actionError, setActionError] = useState<unknown>(null);
+  const [pendingDelete, setPendingDelete] = useState<DocumentResponse | null>(null);
   const [pollCount, setPollCount] = useState(0);
   const documentsKey = `${meridianKeys.documents(collectionId || undefined)}${collectionId ? "&" : "?"}limit=${PAGE_SIZE}&offset=${(page - 1) * PAGE_SIZE}`;
   const documents = useSWR<DocumentListResponse>(documentsKey, meridianRequest);
@@ -61,8 +63,10 @@ export function DocumentLibrary({ canReingest }: { canReingest: boolean }) {
   const onDrop = useCallback((files: File[]) => { const first = files[0]; if (first) void upload(first); }, [upload]);
   const dropzone = useDropzone({ onDrop, multiple: false, accept: ACCEPTED_UPLOAD_TYPES });
 
-  async function deleteDocument(document: DocumentResponse) {
-    if (!window.confirm(`Remove ${document.filename}? It disappears from Meridian immediately; file and vector cleanup runs asynchronously.`)) return;
+  async function confirmDeleteDocument() {
+    if (!pendingDelete) return;
+    const document = pendingDelete;
+    setPendingDelete(null);
     try { await meridianRequest(`/api/meridian/documents/${document.id}`, { method: "DELETE" }); setNotice("Document removed. Cleanup has been queued."); await documents.mutate(); }
     catch (error) { setActionError(error); }
   }
@@ -81,8 +85,11 @@ export function DocumentLibrary({ canReingest }: { canReingest: boolean }) {
     </label><a className="rounded-md border border-border px-3 py-2 text-sm" href="/collections">Manage collections</a></div>
     <div {...dropzone.getRootProps()} className="mt-6 cursor-pointer rounded-lg border border-dashed border-primary/50 bg-card p-8 text-center"><input {...dropzone.getInputProps()} /><p className="font-medium">Drop a PDF, DOCX, or TXT file here, or choose a file</p><p className="mt-1 text-sm text-muted-foreground">Maximum size: 10 MiB. {collectionId ? "The selected collection will be assigned." : "It will be left unfiled."}</p></div>
     {notice ? <p role="status" className="mt-4 rounded-md bg-muted p-3 text-sm">{notice}</p> : null}{actionError ? <div className="mt-4"><ApiFeedback error={actionError} onRetry={() => { setActionError(null); void refreshDocuments(); }} /></div> : null}
-    <div className="mt-8">{documents.isLoading ? <LoadingState label="Loading documents…" /> : documents.error ? <ApiFeedback error={documents.error} onRetry={() => void refreshDocuments()} /> : (documents.data?.documents.length ?? 0) === 0 ? <EmptyState title="No documents yet">Upload a supported file to start building your library.</EmptyState> : <><DocumentTable documents={documents.data?.documents ?? []} canReingest={canReingest} onDelete={deleteDocument} onReingest={reingest} /><Pagination currentPage={page} onPageChange={setPage} pageSize={PAGE_SIZE} total={documents.data?.total ?? 0} /></>}</div>
+    <div className="mt-8">{documents.isLoading ? <LoadingState label="Loading documents…" /> : documents.error ? <ApiFeedback error={documents.error} onRetry={() => void refreshDocuments()} /> : (documents.data?.documents.length ?? 0) === 0 ? <EmptyState title="No documents yet">Upload a supported file to start building your library.</EmptyState> : <><DocumentTable documents={documents.data?.documents ?? []} canReingest={canReingest} onDelete={setPendingDelete} onReingest={reingest} /><Pagination currentPage={page} onPageChange={setPage} pageSize={PAGE_SIZE} total={documents.data?.total ?? 0} /></>}</div>
     {active && pollCount >= MAX_POLL_ATTEMPTS ? <p className="mt-3 text-sm text-muted-foreground">Processing is still running. Refresh this page to check again.</p> : null}
+    <ConfirmDialog confirmLabel="Delete document" onCancel={() => setPendingDelete(null)} onConfirm={() => void confirmDeleteDocument()} open={Boolean(pendingDelete)} title="Delete document?">
+      {pendingDelete ? `Remove ${pendingDelete.filename}? It disappears immediately; file and vector cleanup continue safely in the background.` : null}
+    </ConfirmDialog>
   </section>;
 }
 

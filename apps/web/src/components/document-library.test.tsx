@@ -70,10 +70,14 @@ describe("document-library workspace", () => {
       return Response.json({ collections: [], total: 0 });
     });
     vi.stubGlobal("fetch", fetchMock);
-    vi.stubGlobal("confirm", () => true);
-
     renderWithFreshCache(<DocumentLibrary canReingest={false} />);
     fireEvent.click(await screen.findByRole("button", { name: "Delete" }));
+
+    expect(fetchMock).not.toHaveBeenCalledWith(
+      `/api/meridian/documents/${document.id}`,
+      expect.anything(),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Delete document" }));
 
     await waitFor(() => expect(fetchMock).toHaveBeenCalledWith(
       `/api/meridian/documents/${document.id}`,

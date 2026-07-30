@@ -1,6 +1,6 @@
 # Meridian
 
-Meridian is a monorepo for a production-oriented RAG application.
+Meridian is a production-oriented RAG application: every answer, precisely located.
 
 For VS Code launch profiles, safe breakpoint placement, and end-to-end ingestion and
 chat debugging flows, see [DEBUGGING.md](DEBUGGING.md).
@@ -37,6 +37,13 @@ Current ingestion flow:
 9. Job/document move to `ready` on success, or `failed` on error
 
 ## Local setup
+
+### Web browser baseline
+
+Meridian's automated web baseline is current Chromium through Playwright. Use current
+Chrome/Chromium locally; verify Firefox and Safari manually before a release. The web
+app requires Node.js 20+, pnpm, and a valid root `.env` for Auth0 and the Meridian API.
+Run browser fixtures with `pnpm --filter @meridian/web exec playwright test`.
 
 ### 1) Create environment file
 

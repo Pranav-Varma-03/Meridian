@@ -1,5 +1,5 @@
-import { ChatWorkspace } from "@/components/chat-workspace";
+import { ChatsIndex } from "@/components/chats-index";
 
 export default function ChatPage() {
-  return <ChatWorkspace />;
+  return <ChatsIndex />;
 }
