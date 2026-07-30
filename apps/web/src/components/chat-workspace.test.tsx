@@ -84,6 +84,39 @@ describe("ChatWorkspace", () => {
     expect(screen.getByRole("button", { name: "Product ×" })).toBeInTheDocument();
   });
 
+  it("prepends older cursor history without replacing the newest page", async () => {
+    const conversationId = "33333333-3333-4333-8333-333333333333";
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const path = String(input);
+        if (path.includes(`/conversations/${conversationId}`)) {
+          const older = path.includes("before_sequence=2");
+          return Response.json({
+            id: conversationId,
+            title: "History",
+            messages: older
+              ? [{ id: "old", role: "user", content: "Older turn", citations: {}, created_at: "2026-01-01T00:00:00Z" }]
+              : [{ id: "new", role: "assistant", content: "Newest turn", citations: {}, created_at: "2026-01-02T00:00:00Z" }],
+            retrieval_scope: { mode: "all", collection_ids: [], version: 1 },
+            scope_events: [],
+            has_more_messages: !older,
+            next_before_sequence: older ? null : 2,
+          });
+        }
+        return Response.json({
+          collections: [{ id: "collection-1", name: "Product", description: null, document_count: 1, created_at: "2026-07-30T00:00:00Z" }],
+          total: 1,
+        });
+      })
+    );
+    renderWorkspace(<ChatWorkspace conversationId={conversationId} />);
+    expect(await screen.findByText("Newest turn")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Load older messages" }));
+    expect(await screen.findByText("Older turn")).toBeInTheDocument();
+    expect(screen.getByText("Newest turn")).toBeInTheDocument();
+  });
+
   it("replaces the new-chat URL after the terminal stream creates a conversation", async () => {
     streamChat.mockImplementation(
       async (_request: unknown, handlers: { onEvent: (event: any) => void }) => {

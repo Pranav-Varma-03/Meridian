@@ -3,6 +3,7 @@
 import type { ConversationSummary } from "@meridian/shared";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
+import type { KeyboardEvent as ReactKeyboardEvent } from "react";
 import { useEffect, useRef, useState } from "react";
 import useSWR from "swr";
 
@@ -21,16 +22,19 @@ export function ChatSidebar({
   capabilities,
   mobile = false,
   onClose,
+  onNavigate,
 }: {
   email: string | null | undefined;
   capabilities: WorkspaceCapabilities;
   mobile?: boolean;
   onClose?: () => void;
+  onNavigate?: () => void;
 }) {
   const pathname = usePathname();
   const [collapsed, setCollapsed] = useState(false);
   const [accountOpen, setAccountOpen] = useState(false);
   const accountTrigger = useRef<HTMLButtonElement>(null);
+  const drawer = useRef<HTMLElement>(null);
   const wasOpen = useRef(false);
   const history = useSWR<{ conversations: ConversationSummary[]; total: number }>(
     key,
@@ -40,15 +44,18 @@ export function ChatSidebar({
     setCollapsed(window.localStorage.getItem("meridian-chat-sidebar") === "collapsed");
   }, []);
   useEffect(() => {
+    if (mobile) return;
     const close = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        if (accountOpen) setAccountOpen(false);
-        else onClose?.();
-      }
+      if (event.key === "Escape" && accountOpen) setAccountOpen(false);
     };
     window.addEventListener("keydown", close);
     return () => window.removeEventListener("keydown", close);
-  }, [accountOpen, onClose]);
+  }, [accountOpen, mobile]);
+  useEffect(() => {
+    if (!mobile) return;
+    const frame = window.requestAnimationFrame(() => firstFocusable(drawer.current)?.focus());
+    return () => window.cancelAnimationFrame(frame);
+  }, [mobile]);
   useEffect(() => {
     if (!accountOpen && wasOpen.current) accountTrigger.current?.focus();
     wasOpen.current = accountOpen;
@@ -60,6 +67,32 @@ export function ChatSidebar({
       return next;
     });
   }
+  function handleDrawerKeyDown(event: ReactKeyboardEvent<HTMLElement>) {
+    if (!mobile) return;
+    if (event.key === "Escape") {
+      event.preventDefault();
+      event.stopPropagation();
+      if (accountOpen) setAccountOpen(false);
+      else onClose?.();
+      return;
+    }
+    if (event.key !== "Tab") return;
+    const focusable = focusableElements(drawer.current);
+    if (!focusable.length) {
+      event.preventDefault();
+      return;
+    }
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  }
+  const closeForNavigation = mobile ? onNavigate : undefined;
   const size = mobile
     ? "fixed inset-y-0 left-0 z-30 w-72 p-3 shadow-xl"
     : collapsed
@@ -70,12 +103,17 @@ export function ChatSidebar({
     <aside
       className={`h-full min-h-0 shrink-0 border-r border-border bg-card flex flex-col ${mobile ? "md:hidden" : "hidden md:flex"} ${size}`}
       aria-label="Chat navigation"
+      aria-modal={mobile || undefined}
+      onKeyDown={handleDrawerKeyDown}
+      ref={drawer}
+      role={mobile ? "dialog" : undefined}
     >
       <div className="flex items-center justify-between gap-2">
         <Link
           aria-label="Meridian new chat"
           className="truncate rounded px-2 py-2 text-lg font-semibold"
           href="/new"
+          onClick={closeForNavigation}
         >
           {compact ? "M" : "Meridian"}
         </Link>
@@ -99,6 +137,7 @@ export function ChatSidebar({
         aria-label="New chat"
         className="mt-4 rounded-lg bg-primary px-3 py-2 text-center text-sm text-primary-foreground"
         href="/new"
+        onClick={closeForNavigation}
       >
         {compact ? "+" : "New chat"}
       </Link>
@@ -116,6 +155,7 @@ export function ChatSidebar({
                 className={`block rounded px-2 py-2 text-sm ${active ? "bg-muted font-medium" : "hover:bg-muted"} ${compact ? "text-center" : ""}`}
                 href={item.href}
                 key={item.href}
+                onClick={closeForNavigation}
                 title={compact ? item.label : undefined}
               >
                 {compact ? item.icon : item.label}
@@ -135,6 +175,7 @@ export function ChatSidebar({
                   className={`block truncate rounded px-2 py-2 text-sm ${pathname === `/chat/${conversation.id}` ? "bg-muted" : "hover:bg-muted"}`}
                   href={`/chat/${conversation.id}`}
                   key={conversation.id}
+                  onClick={closeForNavigation}
                 >
                   {conversation.title ?? "Untitled conversation"}
                 </Link>
@@ -143,6 +184,7 @@ export function ChatSidebar({
                 <Link
                   className="block px-2 py-2 text-sm text-muted-foreground underline"
                   href="/chat"
+                  onClick={closeForNavigation}
                 >
                   View all chats
                 </Link>
@@ -155,6 +197,7 @@ export function ChatSidebar({
               aria-label="All chats"
               className="block rounded p-2 text-center hover:bg-muted"
               href="/chat"
+              onClick={closeForNavigation}
               title="All chats"
             >
               ◷
@@ -194,6 +237,7 @@ export function ChatSidebar({
             <a
               className="mt-4 block rounded px-2 py-2 text-sm hover:bg-muted"
               href="/auth/logout"
+              onClick={closeForNavigation}
               role="menuitem"
             >
               Log out
@@ -203,4 +247,17 @@ export function ChatSidebar({
       </div>
     </aside>
   );
+}
+
+function focusableElements(container: HTMLElement | null): HTMLElement[] {
+  if (!container) return [];
+  return Array.from(
+    container.querySelectorAll<HTMLElement>(
+      'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+    )
+  ).filter((element) => !element.hasAttribute("hidden"));
+}
+
+function firstFocusable(container: HTMLElement | null): HTMLElement | undefined {
+  return focusableElements(container)[0];
 }

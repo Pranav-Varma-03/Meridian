@@ -11,7 +11,7 @@ import type {
 } from "@meridian/shared";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import { FormEvent, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import useSWR, { mutate as mutateCache } from "swr";
 
 import { ApiFeedback, EmptyState, LoadingState } from "@/components/app-feedback";
@@ -25,6 +25,7 @@ type LiveMessage = ConversationMessage & {
   sources?: SourceCitation[];
 };
 const allScope: RetrievalScopeResponse = { mode: "all", collection_ids: [], version: 0 };
+const HISTORY_PAGE_SIZE = 50;
 
 export function ChatWorkspace({ conversationId }: { conversationId?: string }) {
   const router = useRouter();
@@ -40,9 +41,12 @@ export function ChatWorkspace({ conversationId }: { conversationId?: string }) {
   const aborter = useRef<AbortController | null>(null);
   const transcript = useRef<HTMLDivElement | null>(null);
   const [nearLatest, setNearLatest] = useState(true);
+  const [loadingOlder, setLoadingOlder] = useState(false);
+  const [historyPage, setHistoryPage] = useState({ hasMore: false, beforeSequence: null as number | null });
+  const prependHeight = useRef<number | null>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const detail = useSWR<ConversationResponse>(
-    conversationId ? `/api/meridian/chat/conversations/${conversationId}` : null,
+    conversationId ? `/api/meridian/chat/conversations/${conversationId}?message_limit=${HISTORY_PAGE_SIZE}` : null,
     meridianRequest
   );
   const collections = useSWR<CollectionListResponse>(
@@ -64,14 +68,44 @@ export function ChatWorkspace({ conversationId }: { conversationId?: string }) {
       setMessages(detail.data.messages);
       setScope(detail.data.retrieval_scope);
       setScopeDirty(false);
+      setHistoryPage({ hasMore: detail.data.has_more_messages, beforeSequence: detail.data.next_before_sequence });
     }
   }, [detail.data]);
   useEffect(() => () => aborter.current?.abort(), []);
   useEffect(() => {
     const element = transcript.current;
     if (!element || isNew) return;
+    if (prependHeight.current !== null) return;
     if (nearLatest) element.scrollTop = element.scrollHeight;
   }, [isNew, messages, nearLatest]);
+  useLayoutEffect(() => {
+    const element = transcript.current;
+    if (element && prependHeight.current !== null) {
+      element.scrollTop += element.scrollHeight - prependHeight.current;
+      prependHeight.current = null;
+    }
+  }, [messages]);
+  async function loadOlderMessages() {
+    if (!conversationId || !historyPage.beforeSequence || loadingOlder) return;
+    const element = transcript.current;
+    if (element) prependHeight.current = element.scrollHeight;
+    setLoadingOlder(true);
+    try {
+      const page = await meridianRequest<ConversationResponse>(
+        `/api/meridian/chat/conversations/${conversationId}?message_limit=${HISTORY_PAGE_SIZE}&before_sequence=${historyPage.beforeSequence}`
+      );
+      setMessages((current) => {
+        const known = new Set(current.map((message) => message.id));
+        return [...page.messages.filter((message) => !known.has(message.id)), ...current];
+      });
+      setHistoryPage({ hasMore: page.has_more_messages, beforeSequence: page.next_before_sequence });
+    } catch (reason) {
+      prependHeight.current = null;
+      setError(reason);
+    } finally {
+      setLoadingOlder(false);
+    }
+  }
   function preferredScope(): RetrievalScopeRequest {
     return scope.mode === "collections"
       ? { mode: "collections", collection_ids: scope.collection_ids }
@@ -263,6 +297,16 @@ export function ChatWorkspace({ conversationId }: { conversationId?: string }) {
             }}
             ref={isNew ? undefined : transcript}
           >
+            {!isNew && historyPage.hasMore ? (
+              <button
+                className="mb-3 rounded border border-border px-3 py-1 text-sm disabled:opacity-50"
+                disabled={loadingOlder}
+                onClick={() => void loadOlderMessages()}
+                type="button"
+              >
+                {loadingOlder ? "Loading older messages…" : "Load older messages"}
+              </button>
+            ) : null}
             {!hasLibrary && !messages.length ? (
               <EmptyState title="Upload a document to start">
                 Grounded chat needs ready documents.{" "}

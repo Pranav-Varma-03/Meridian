@@ -130,6 +130,8 @@ class ConversationResponse(BaseModel):
     messages: list[ConversationMessage]
     retrieval_scope: RetrievalScopeResponse
     scope_events: list[ConversationScopeEventResponse]
+    has_more_messages: bool = False
+    next_before_sequence: int | None = None
 
     model_config = ConfigDict(
         json_schema_extra={
@@ -570,13 +572,17 @@ async def list_conversations(
 )
 async def get_conversation(
     conversation_id: uuid.UUID,
+    message_limit: int | None = Query(default=None, ge=1, le=100),
+    before_sequence: int | None = Query(default=None, ge=1),
     current_user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_db_session),
 ) -> ConversationResponse:
     try:
-        result = await conversations.get_conversation_with_messages(
-            session, user_id=current_user.id, conversation_id=conversation_id
-        )
+        kwargs = {"user_id": current_user.id, "conversation_id": conversation_id}
+        if message_limit is not None:
+            kwargs["message_limit"] = message_limit
+            kwargs["before_sequence"] = before_sequence
+        result = await conversations.get_conversation_with_messages(session, **kwargs)
     except conversations.ConversationNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     return ConversationResponse(
@@ -599,6 +605,8 @@ async def get_conversation(
             )
             for event in result.scope_events
         ],
+        has_more_messages=getattr(result, "has_more_messages", False),
+        next_before_sequence=getattr(result, "next_before_sequence", None),
     )
 
 

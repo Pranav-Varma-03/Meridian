@@ -162,6 +162,8 @@ export interface ConversationResponse {
   messages: ConversationMessage[];
   retrieval_scope: RetrievalScopeResponse;
   scope_events: ConversationScopeEventResponse[];
+  has_more_messages: boolean;
+  next_before_sequence: number | null;
 }
 
 export interface ChatTextEvent {

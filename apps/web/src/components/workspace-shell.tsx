@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useRef, useState } from "react";
 
 import { ChatSidebar } from "@/components/chat-sidebar";
 import type { WorkspaceCapabilities } from "@/lib/server/capabilities";
@@ -15,6 +15,15 @@ export function WorkspaceShell({
   capabilities: WorkspaceCapabilities;
 }) {
   const [mobileOpen, setMobileOpen] = useState(false);
+  const mobileOpener = useRef<HTMLButtonElement>(null);
+
+  function closeMobileNavigation(restoreFocus = true) {
+    setMobileOpen(false);
+    if (restoreFocus) {
+      window.requestAnimationFrame(() => mobileOpener.current?.focus());
+    }
+  }
+
   return (
     <div className="h-dvh overflow-hidden bg-background text-foreground">
       <div className="mx-auto flex h-full min-h-0 max-w-screen-2xl">
@@ -23,23 +32,24 @@ export function WorkspaceShell({
           aria-label="Open workspace navigation"
           className="fixed left-3 top-3 z-10 rounded border border-border bg-card p-2 shadow-sm md:hidden"
           onClick={() => setMobileOpen(true)}
+          ref={mobileOpener}
           type="button"
         >
           ☰
         </button>
         {mobileOpen ? (
           <>
-            <button
-              aria-label="Close chat navigation"
+            <div
+              aria-hidden="true"
               className="fixed inset-0 z-20 bg-black/30 md:hidden"
-              onClick={() => setMobileOpen(false)}
-              type="button"
+              onClick={() => closeMobileNavigation()}
             />
             <ChatSidebar
               capabilities={capabilities}
               email={email}
               mobile
-              onClose={() => setMobileOpen(false)}
+              onClose={() => closeMobileNavigation()}
+              onNavigate={() => closeMobileNavigation(false)}
             />
           </>
         ) : null}

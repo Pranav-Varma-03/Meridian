@@ -52,6 +52,8 @@ class ConversationWithMessages:
     display_citations: dict[uuid.UUID, dict] = field(default_factory=dict)
     retrieval_scope: EffectiveRetrievalScope | None = None
     scope_events: list[ConversationScopeEvent] = field(default_factory=list)
+    has_more_messages: bool = False
+    next_before_sequence: int | None = None
 
 
 async def get_conversation(
@@ -278,17 +280,38 @@ async def list_conversations(
 
 
 async def get_conversation_with_messages(
-    session: AsyncSession, *, user_id: uuid.UUID, conversation_id: uuid.UUID
+    session: AsyncSession,
+    *,
+    user_id: uuid.UUID,
+    conversation_id: uuid.UUID,
+    message_limit: int | None = None,
+    before_sequence: int | None = None,
 ) -> ConversationWithMessages:
     conversation = await get_conversation(
         session, user_id=user_id, conversation_id=conversation_id
     )
-    messages = await session.scalars(
-        select(Message)
-        .where(Message.conversation_id == conversation.id)
-        .order_by(Message.sequence_number.asc())
-    )
-    message_list = list(messages.all())
+    statement = select(Message).where(Message.conversation_id == conversation.id)
+    if before_sequence is not None:
+        statement = statement.where(Message.sequence_number < before_sequence)
+    if message_limit is None:
+        messages = await session.scalars(
+            statement.order_by(Message.sequence_number.asc())
+        )
+        message_list = list(messages.all())
+        has_more_messages = False
+        next_before_sequence = None
+    else:
+        messages = await session.scalars(
+            statement.order_by(Message.sequence_number.desc()).limit(message_limit + 1)
+        )
+        newest_first = list(messages.all())
+        has_more_messages = len(newest_first) > message_limit
+        message_list = list(reversed(newest_first[:message_limit]))
+        next_before_sequence = (
+            message_list[0].sequence_number
+            if has_more_messages and message_list
+            else None
+        )
     scope_events = await session.scalars(
         select(ConversationScopeEvent)
         .where(ConversationScopeEvent.conversation_id == conversation.id)
@@ -306,6 +329,8 @@ async def get_conversation_with_messages(
             session, conversation_id=conversation.id
         ),
         scope_events=list(scope_events.all()),
+        has_more_messages=has_more_messages,
+        next_before_sequence=next_before_sequence,
     )
 
 

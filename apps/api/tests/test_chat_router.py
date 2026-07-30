@@ -501,3 +501,37 @@ async def test_conversation_route_hides_other_users_conversation(
 
     assert response.status_code == 404
     assert response.json()["error"]["message"] == "Conversation not found"
+
+
+@pytest.mark.asyncio
+async def test_conversation_detail_accepts_cursor_page_parameters(
+    api_client: AsyncClient, chat_dependencies, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    user, conversation, _added = chat_dependencies
+    captured: dict[str, object] = {}
+
+    async def _detail(_session, **kwargs):
+        captured.update(kwargs)
+        return types.SimpleNamespace(
+            conversation=conversation,
+            messages=[],
+            display_citations={},
+            retrieval_scope=conversations.EffectiveRetrievalScope(
+                RetrievalScopeMode.all, (), 0
+            ),
+            scope_events=[],
+            has_more_messages=True,
+            next_before_sequence=42,
+        )
+
+    monkeypatch.setattr(conversations, "get_conversation_with_messages", _detail)
+    response = await api_client.get(
+        f"/api/v1/chat/conversations/{conversation.id}?message_limit=25&before_sequence=99"
+    )
+
+    assert response.status_code == 200
+    assert captured["user_id"] == user.id
+    assert captured["message_limit"] == 25
+    assert captured["before_sequence"] == 99
+    assert response.json()["has_more_messages"] is True
+    assert response.json()["next_before_sequence"] == 42

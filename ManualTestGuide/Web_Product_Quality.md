@@ -18,6 +18,7 @@
 - [ ] Tab through navigation, upload, collection, chat, scope, source, and delete controls. Confirm focus remains visible.
 - [ ] Change the theme to Light, Dark, then System; reload after each and confirm it persists.
 - [ ] Upload a valid document and verify queued/processing/ready feedback. Try an invalid file and confirm safe feedback.
+- [ ] Rename a collection, cancel once, then save a valid name. Verify the in-product dialog closes, focus returns to Rename, and the updated list remains visible.
 - [ ] Delete a document and confirm the dialog can be closed with Escape and returns focus to its trigger.
 - [ ] Start a chat and confirm the live region announces start, completion, or failure without reading each token.
 - [ ] Change collections, send a turn, reload the conversation, and confirm scope and scope timeline restore.

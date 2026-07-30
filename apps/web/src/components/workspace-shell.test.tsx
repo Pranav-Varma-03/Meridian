@@ -1,5 +1,5 @@
 import React from "react";
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { WorkspaceShell } from "./workspace-shell";
@@ -41,7 +41,37 @@ describe("WorkspaceShell", () => {
     expect(screen.getByRole("main").parentElement).toHaveClass("h-full");
   });
 
-  it("opens and closes the labeled mobile chat drawer", () => {
+  it("opens a modal mobile drawer and restores opener focus after Escape", async () => {
+    render(
+      <ThemeProvider>
+        <WorkspaceShell capabilities={{ canReingest: false, permissions: [] }} email={null}>
+          <p>Workspace content</p>
+        </WorkspaceShell>
+      </ThemeProvider>
+    );
+
+    const opener = screen.getByRole("button", { name: "Open workspace navigation" });
+    fireEvent.click(opener);
+    const drawer = screen.getByRole("dialog", { name: "Chat navigation" });
+    expect(drawer).toHaveAttribute("aria-modal", "true");
+    await new Promise((resolve) => window.requestAnimationFrame(resolve));
+    expect(within(drawer).getByRole("link", { name: "Meridian new chat" })).toHaveFocus();
+
+    fireEvent.keyDown(drawer, { key: "Escape" });
+    expect(screen.queryByRole("dialog", { name: "Chat navigation" })).not.toBeInTheDocument();
+    await new Promise((resolve) => window.requestAnimationFrame(resolve));
+    expect(opener).toHaveFocus();
+
+    fireEvent.click(opener);
+    const backdrop = document.querySelector<HTMLElement>('[aria-hidden="true"]');
+    expect(backdrop).not.toBeNull();
+    fireEvent.click(backdrop!);
+    expect(screen.queryByRole("dialog", { name: "Chat navigation" })).not.toBeInTheDocument();
+    await new Promise((resolve) => window.requestAnimationFrame(resolve));
+    expect(opener).toHaveFocus();
+  });
+
+  it("keeps Tab focus inside the mobile drawer and closes it on navigation", () => {
     render(
       <ThemeProvider>
         <WorkspaceShell capabilities={{ canReingest: false, permissions: [] }} email={null}>
@@ -51,10 +81,14 @@ describe("WorkspaceShell", () => {
     );
 
     fireEvent.click(screen.getByRole("button", { name: "Open workspace navigation" }));
-    expect(screen.getAllByRole("button", { name: "Close chat navigation" })).not.toHaveLength(0);
+    const drawer = screen.getByRole("dialog", { name: "Chat navigation" });
+    const account = within(drawer).getByRole("button", { name: "Signed in" });
+    account.focus();
+    fireEvent.keyDown(drawer, { key: "Tab" });
+    expect(within(drawer).getByRole("link", { name: "Meridian new chat" })).toHaveFocus();
 
-    fireEvent.click(screen.getAllByRole("button", { name: "Close chat navigation" })[0]);
-    expect(screen.queryByRole("button", { name: "Close chat navigation" })).not.toBeInTheDocument();
+    fireEvent.click(within(drawer).getByRole("link", { name: "Documents" }), { ctrlKey: true });
+    expect(screen.queryByRole("dialog", { name: "Chat navigation" })).not.toBeInTheDocument();
   });
 
   it("keeps the sidebar on Documents without rendering a top bar", () => {
