@@ -68,7 +68,7 @@ export function ChatSidebar({
   const compact = collapsed && !mobile;
   return (
     <aside
-      className={`shrink-0 border-r border-border bg-card flex flex-col ${mobile ? "md:hidden" : "hidden md:flex"} ${size}`}
+      className={`h-full min-h-0 shrink-0 border-r border-border bg-card flex flex-col ${mobile ? "md:hidden" : "hidden md:flex"} ${size}`}
       aria-label="Chat navigation"
     >
       <div className="flex items-center justify-between gap-2">
@@ -102,64 +102,66 @@ export function ChatSidebar({
       >
         {compact ? "+" : "New chat"}
       </Link>
-      <nav className="mt-3 space-y-1" aria-label="Workspace">
-        {workspaceNavigation.map((item) => {
-          const active =
-            item.href === "/chat"
-              ? pathname === "/new" || pathname.startsWith("/chat")
-              : pathname === item.href;
-          return (
-            <Link
-              aria-current={active ? "page" : undefined}
-              aria-label={compact ? item.label : undefined}
-              className={`block rounded px-2 py-2 text-sm ${active ? "bg-muted font-medium" : "hover:bg-muted"} ${compact ? "text-center" : ""}`}
-              href={item.href}
-              key={item.href}
-              title={compact ? item.label : undefined}
-            >
-              {compact ? item.icon : item.label}
-            </Link>
-          );
-        })}
-      </nav>
-      {!compact ? (
-        <>
-          <p className="mt-6 px-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-            Recents
-          </p>
-          <nav className="mt-2 space-y-1" aria-label="Recent conversations">
-            {history.data?.conversations.map((conversation) => (
+      <div className="min-h-0 flex-1 overflow-y-auto">
+        <nav className="mt-3 space-y-1" aria-label="Workspace">
+          {workspaceNavigation.map((item) => {
+            const active =
+              item.href === "/chat"
+                ? pathname === "/new" || pathname.startsWith("/chat")
+                : pathname === item.href;
+            return (
               <Link
-                aria-current={pathname === `/chat/${conversation.id}` ? "page" : undefined}
-                className={`block truncate rounded px-2 py-2 text-sm ${pathname === `/chat/${conversation.id}` ? "bg-muted" : "hover:bg-muted"}`}
-                href={`/chat/${conversation.id}`}
-                key={conversation.id}
+                aria-current={active ? "page" : undefined}
+                aria-label={compact ? item.label : undefined}
+                className={`block rounded px-2 py-2 text-sm ${active ? "bg-muted font-medium" : "hover:bg-muted"} ${compact ? "text-center" : ""}`}
+                href={item.href}
+                key={item.href}
+                title={compact ? item.label : undefined}
               >
-                {conversation.title ?? "Untitled conversation"}
+                {compact ? item.icon : item.label}
               </Link>
-            ))}
-            {history.data?.conversations.length ? (
-              <Link
-                className="block px-2 py-2 text-sm text-muted-foreground underline"
-                href="/chat"
-              >
-                View all chats
-              </Link>
-            ) : null}
-          </nav>
-        </>
-      ) : (
-        <nav className="mt-4" aria-label="Recent conversations">
-          <Link
-            aria-label="All chats"
-            className="block rounded p-2 text-center hover:bg-muted"
-            href="/chat"
-            title="All chats"
-          >
-            ◷
-          </Link>
+            );
+          })}
         </nav>
-      )}
+        {!compact ? (
+          <>
+            <p className="mt-6 px-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+              Recents
+            </p>
+            <nav className="mt-2 space-y-1" aria-label="Recent conversations">
+              {history.data?.conversations.map((conversation) => (
+                <Link
+                  aria-current={pathname === `/chat/${conversation.id}` ? "page" : undefined}
+                  className={`block truncate rounded px-2 py-2 text-sm ${pathname === `/chat/${conversation.id}` ? "bg-muted" : "hover:bg-muted"}`}
+                  href={`/chat/${conversation.id}`}
+                  key={conversation.id}
+                >
+                  {conversation.title ?? "Untitled conversation"}
+                </Link>
+              ))}
+              {history.data?.conversations.length ? (
+                <Link
+                  className="block px-2 py-2 text-sm text-muted-foreground underline"
+                  href="/chat"
+                >
+                  View all chats
+                </Link>
+              ) : null}
+            </nav>
+          </>
+        ) : (
+          <nav className="mt-4" aria-label="Recent conversations">
+            <Link
+              aria-label="All chats"
+              className="block rounded p-2 text-center hover:bg-muted"
+              href="/chat"
+              title="All chats"
+            >
+              ◷
+            </Link>
+          </nav>
+        )}
+      </div>
       <div className="relative mt-auto">
         <button
           aria-expanded={accountOpen}

@@ -36,7 +36,10 @@ export function ChatWorkspace({ conversationId }: { conversationId?: string }) {
   const [streaming, setStreaming] = useState(false);
   const [error, setError] = useState<unknown>(null);
   const [streamAnnouncement, setStreamAnnouncement] = useState("");
+  const isNew = !conversationId;
   const aborter = useRef<AbortController | null>(null);
+  const transcript = useRef<HTMLDivElement | null>(null);
+  const [nearLatest, setNearLatest] = useState(true);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const detail = useSWR<ConversationResponse>(
     conversationId ? `/api/meridian/chat/conversations/${conversationId}` : null,
@@ -64,6 +67,11 @@ export function ChatWorkspace({ conversationId }: { conversationId?: string }) {
     }
   }, [detail.data]);
   useEffect(() => () => aborter.current?.abort(), []);
+  useEffect(() => {
+    const element = transcript.current;
+    if (!element || isNew) return;
+    if (nearLatest) element.scrollTop = element.scrollHeight;
+  }, [isNew, messages, nearLatest]);
   function preferredScope(): RetrievalScopeRequest {
     return scope.mode === "collections"
       ? { mode: "collections", collection_ids: scope.collection_ids }
@@ -196,10 +204,9 @@ export function ChatWorkspace({ conversationId }: { conversationId?: string }) {
       setError(reason);
     }
   }
-  const isNew = !conversationId;
   return (
     <section
-      className={`flex min-h-full min-w-0 flex-1 flex-col ${isNew ? "justify-center px-4 pb-24" : "px-4 py-8 sm:px-8"}`}
+      className={`flex min-w-0 flex-1 flex-col ${isNew ? "min-h-full justify-center px-4 pb-24" : "h-full min-h-0 overflow-hidden px-4 py-8 sm:px-8"}`}
     >
       <p aria-live="polite" className="sr-only">
         {streamAnnouncement}
@@ -215,7 +222,7 @@ export function ChatWorkspace({ conversationId }: { conversationId?: string }) {
         </div>
       ) : (
         <>
-          <header className={isNew ? "mx-auto mb-8 max-w-2xl text-center" : "mb-5"}>
+          <header className={`${isNew ? "mx-auto mb-8 max-w-2xl text-center" : "mb-5 shrink-0"}`}>
             <p className="text-sm font-medium text-primary">
               {isNew ? "Meridian" : "Conversation"}
             </p>
@@ -248,7 +255,14 @@ export function ChatWorkspace({ conversationId }: { conversationId?: string }) {
             setCollectionIds={setCollectionIds}
             compact={isNew}
           />
-          <div className={`w-full ${isNew ? "mx-auto max-w-3xl" : "flex-1 space-y-4"}`}>
+          <div
+            className={`w-full ${isNew ? "mx-auto max-w-3xl" : "min-h-0 flex-1 space-y-4 overflow-y-auto pr-1"}`}
+            onScroll={(event) => {
+              const element = event.currentTarget;
+              setNearLatest(element.scrollHeight - element.scrollTop - element.clientHeight < 80);
+            }}
+            ref={isNew ? undefined : transcript}
+          >
             {!hasLibrary && !messages.length ? (
               <EmptyState title="Upload a document to start">
                 Grounded chat needs ready documents.{" "}
@@ -264,13 +278,28 @@ export function ChatWorkspace({ conversationId }: { conversationId?: string }) {
               />
             ) : null}
           </div>
+          {!isNew && !nearLatest ? (
+            <button
+              className="mb-2 self-end rounded border border-border px-3 py-1 text-sm"
+              onClick={() => {
+                const element = transcript.current;
+                if (element) {
+                  element.scrollTop = element.scrollHeight;
+                  setNearLatest(true);
+                }
+              }}
+              type="button"
+            >
+              Jump to latest
+            </button>
+          ) : null}
           <form
-            className={`mt-6 flex w-full flex-wrap gap-2 ${isNew ? "mx-auto max-w-3xl" : ""}`}
+            className={`mt-6 shrink-0 flex w-full flex-wrap gap-2 ${isNew ? "mx-auto max-w-3xl" : ""}`}
             onSubmit={submit}
           >
             <textarea
               aria-label="Chat message"
-              className="min-h-14 min-w-0 flex-1 rounded-xl border border-border bg-background p-4"
+              className="min-h-14 max-h-40 min-w-0 flex-1 resize-y overflow-y-auto rounded-xl border border-border bg-background p-4"
               disabled={streaming || !hasLibrary}
               value={query}
               onChange={(event) => setQuery(event.target.value)}
@@ -297,7 +326,7 @@ export function ChatWorkspace({ conversationId }: { conversationId?: string }) {
           </form>
           {!isNew ? (
             <button
-              className="mt-5 self-start text-sm text-muted-foreground underline"
+              className="mt-5 shrink-0 self-start text-sm text-muted-foreground underline"
               onClick={() => setConfirmDelete(true)}
               type="button"
             >
@@ -335,7 +364,7 @@ function ScopeControl({
   const selected = scope.collection_ids;
   return (
     <section
-      className={`w-full ${compact ? "mx-auto mb-3 max-w-3xl" : "mb-5"} rounded border border-border p-3`}
+      className={`w-full shrink-0 ${compact ? "mx-auto mb-3 max-w-3xl" : "mb-5"} rounded border border-border p-3`}
     >
       <p className="text-sm font-medium">
         Retrieval scope: {scope.mode === "all" ? "All documents" : "Selected collections"}

@@ -16,8 +16,8 @@ export function WorkspaceShell({
 }) {
   const [mobileOpen, setMobileOpen] = useState(false);
   return (
-    <div className="min-h-screen overflow-x-hidden bg-background text-foreground">
-      <div className="mx-auto flex min-h-screen max-w-screen-2xl">
+    <div className="h-dvh overflow-hidden bg-background text-foreground">
+      <div className="mx-auto flex h-full min-h-0 max-w-screen-2xl">
         <ChatSidebar capabilities={capabilities} email={email} />
         <button
           aria-label="Open workspace navigation"
@@ -43,7 +43,7 @@ export function WorkspaceShell({
             />
           </>
         ) : null}
-        <main className="min-w-0 flex-1">{children}</main>
+        <main className="min-h-0 min-w-0 flex-1 overflow-y-auto">{children}</main>
       </div>
     </div>
   );

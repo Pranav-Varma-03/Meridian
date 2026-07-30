@@ -20,6 +20,7 @@ describe("ChatSidebar", () => {
         />
       </SWRConfig>
     );
+    expect(screen.getByRole("complementary", { name: "Chat navigation" })).toHaveClass("h-full");
     expect(screen.getByRole("link", { name: "Meridian new chat" })).toHaveAttribute("href", "/new");
     expect(screen.getByRole("link", { name: "Chat" })).toHaveAttribute("href", "/chat");
     expect(screen.getByRole("link", { name: "Documents" })).toHaveAttribute("href", "/documents");

@@ -37,6 +37,8 @@ describe("WorkspaceShell", () => {
     );
     expect(screen.getAllByText("person@example.com")).not.toHaveLength(0);
     expect(screen.queryByText("Re-ingestion enabled")).not.toBeInTheDocument();
+    expect(screen.getByRole("main")).toHaveClass("overflow-y-auto");
+    expect(screen.getByRole("main").parentElement).toHaveClass("h-full");
   });
 
   it("opens and closes the labeled mobile chat drawer", () => {

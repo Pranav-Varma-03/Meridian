@@ -10,7 +10,9 @@
 
 - [ ] Select Meridian or New chat in the sidebar and verify `/new` shows the centered new-chat composer.
 - [ ] Select Chat and verify `/chat` lists the complete paginated conversation history; open a row and verify `/chat/<conversation_id>` reloads the same conversation.
+- [ ] Open a long conversation and verify its transcript scrolls independently while the scope control and composer remain visible. Scroll upward during streaming, confirm reading position remains stable, then use Jump to latest.
 - [ ] Use the workspace-sidebar collapse control, reload, and verify the selected sidebar width persists. Switch among Chat, Documents, and Collections and verify their sidebar links remain functional. At narrow widths, verify the sidebar drawer remains reachable without horizontal overflow.
+- [ ] Populate enough Recent conversations to exceed the sidebar height and verify only the sidebar middle region scrolls while the email/profile control remains visible.
 - [ ] Open the email menu and verify it shows only the email, known Meridian permissions (if any), and Log out. Press Escape to close it.
 - [ ] At 375 px, navigate Chat, Documents, and Collections without horizontal page overflow.
 - [ ] Tab through navigation, upload, collection, chat, scope, source, and delete controls. Confirm focus remains visible.

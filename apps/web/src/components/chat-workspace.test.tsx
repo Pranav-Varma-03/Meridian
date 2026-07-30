@@ -32,6 +32,7 @@ describe("ChatWorkspace", () => {
     renderWorkspace(<ChatWorkspace />);
     expect(await screen.findByText("Upload a document to start")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Send" })).toBeDisabled();
+    expect(screen.getByLabelText("Chat message")).toHaveClass("max-h-40", "overflow-y-auto");
   });
 
   it("renders restored collection scope selections from conversation detail", async () => {
