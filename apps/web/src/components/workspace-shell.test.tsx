@@ -63,7 +63,7 @@ describe("WorkspaceShell", () => {
     expect(opener).toHaveFocus();
 
     fireEvent.click(opener);
-    const backdrop = document.querySelector<HTMLElement>('[aria-hidden="true"]');
+    const backdrop = document.querySelector<HTMLElement>('div[aria-hidden="true"]');
     expect(backdrop).not.toBeNull();
     fireEvent.click(backdrop!);
     expect(screen.queryByRole("dialog", { name: "Chat navigation" })).not.toBeInTheDocument();
@@ -82,7 +82,7 @@ describe("WorkspaceShell", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Open workspace navigation" }));
     const drawer = screen.getByRole("dialog", { name: "Chat navigation" });
-    const account = within(drawer).getByRole("button", { name: "Signed in" });
+    const account = within(drawer).getByRole("button", { name: /Signed in/ });
     account.focus();
     fireEvent.keyDown(drawer, { key: "Tab" });
     expect(within(drawer).getByRole("link", { name: "Meridian new chat" })).toHaveFocus();

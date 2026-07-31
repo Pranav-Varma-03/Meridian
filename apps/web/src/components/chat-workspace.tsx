@@ -12,10 +12,13 @@ import type {
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { FormEvent, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import useSWR, { mutate as mutateCache } from "swr";
 
 import { ApiFeedback, EmptyState, StatusRegion, TranscriptSkeleton } from "@/components/app-feedback";
 import { ConfirmDialog } from "@/components/confirm-dialog";
+import { ChatSourcesPane } from "@/components/chat-sources-pane";
 import { meridianKeys, meridianRequest } from "@/lib/api/client";
 import { streamChat } from "@/lib/chat/client";
 
@@ -24,6 +27,11 @@ type LiveMessage = ConversationMessage & {
   failed?: boolean;
   stopped?: boolean;
   sources?: SourceCitation[];
+};
+type SourceContext = {
+  messageId: string;
+  sources: SourceCitation[];
+  trigger: HTMLButtonElement;
 };
 type ChatPhase = "idle" | "submitting" | "retrieving" | "streaming" | "complete" | "stopped" | "failed";
 const allScope: RetrievalScopeResponse = { mode: "all", collection_ids: [], version: 0 };
@@ -43,11 +51,17 @@ export function ChatWorkspace({ conversationId }: { conversationId?: string }) {
   const aborter = useRef<AbortController | null>(null);
   const activeQuery = useRef<string | null>(null);
   const transcript = useRef<HTMLDivElement | null>(null);
+  const composer = useRef<HTMLTextAreaElement | null>(null);
   const [nearLatest, setNearLatest] = useState(true);
   const [loadingOlder, setLoadingOlder] = useState(false);
   const [historyPage, setHistoryPage] = useState({ hasMore: false, beforeSequence: null as number | null });
   const prependHeight = useRef<number | null>(null);
+  const restoredPrependPosition = useRef(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [sourceContext, setSourceContext] = useState<SourceContext | null>(null);
+  const [scopeOpen, setScopeOpen] = useState(false);
+  const scopeTrigger = useRef<HTMLButtonElement>(null);
+  const scopeOverlay = useRef<HTMLDivElement>(null);
   const detail = useSWR<ConversationResponse>(
     conversationId ? `/api/meridian/chat/conversations/${conversationId}?message_limit=${HISTORY_PAGE_SIZE}` : null,
     meridianRequest
@@ -59,6 +73,7 @@ export function ChatWorkspace({ conversationId }: { conversationId?: string }) {
   const streaming = ["submitting", "retrieving", "streaming"].includes(phase);
   const scopeLoading = collections.isLoading;
   const scopeUnavailable = Boolean(collections.error);
+  const scopeEditable = !scopeLoading && !scopeUnavailable && !streaming;
   const hasLibrary =
     (collections.data?.collections.reduce(
       (count, collection) => count + collection.document_count,
@@ -74,6 +89,20 @@ export function ChatWorkspace({ conversationId }: { conversationId?: string }) {
     setPhase(next);
   }
 
+  function closeSources() {
+    const trigger = sourceContext?.trigger;
+    setSourceContext(null);
+    trigger?.focus();
+  }
+
+  function selectSources(messageId: string, sources: SourceCitation[], trigger: HTMLButtonElement) {
+    if (sourceContext?.messageId === messageId) {
+      closeSources();
+      return;
+    }
+    setSourceContext({ messageId, sources, trigger });
+  }
+
   useEffect(() => {
     if (detail.data) {
       setMessages(detail.data.messages);
@@ -84,9 +113,32 @@ export function ChatWorkspace({ conversationId }: { conversationId?: string }) {
   }, [detail.data]);
   useEffect(() => () => aborter.current?.abort(), []);
   useEffect(() => {
+    if (!scopeOpen) return;
+    const trigger = scopeTrigger.current;
+    scopeOverlay.current?.focus();
+    const closeForOutsidePointer = (event: PointerEvent) => {
+      const target = event.target as Node;
+      if (!scopeOverlay.current?.contains(target) && !scopeTrigger.current?.contains(target)) {
+        setScopeOpen(false);
+      }
+    };
+    window.addEventListener("pointerdown", closeForOutsidePointer);
+    return () => {
+      window.removeEventListener("pointerdown", closeForOutsidePointer);
+      trigger?.focus();
+    };
+  }, [scopeOpen]);
+  useEffect(() => {
+    if (!scopeEditable) setScopeOpen(false);
+  }, [scopeEditable]);
+  useEffect(() => {
     const element = transcript.current;
     if (!element || isNew) return;
     if (prependHeight.current !== null) return;
+    if (restoredPrependPosition.current) {
+      restoredPrependPosition.current = false;
+      return;
+    }
     if (nearLatest) element.scrollTop = element.scrollHeight;
   }, [isNew, messages, nearLatest]);
   useLayoutEffect(() => {
@@ -94,8 +146,15 @@ export function ChatWorkspace({ conversationId }: { conversationId?: string }) {
     if (element && prependHeight.current !== null) {
       element.scrollTop += element.scrollHeight - prependHeight.current;
       prependHeight.current = null;
+      restoredPrependPosition.current = true;
     }
   }, [messages]);
+  useLayoutEffect(() => {
+    const element = composer.current;
+    if (!element) return;
+    element.style.height = "auto";
+    element.style.height = `${Math.min(element.scrollHeight, 112)}px`;
+  }, [query]);
   async function loadOlderMessages() {
     if (!conversationId || !historyPage.beforeSequence || loadingOlder) return;
     const element = transcript.current;
@@ -123,7 +182,7 @@ export function ChatWorkspace({ conversationId }: { conversationId?: string }) {
       : { mode: "all" };
   }
   function setCollectionIds(ids: string[]) {
-    if (scopeLoading || scopeUnavailable) return;
+    if (!scopeEditable) return;
     setScope({
       mode: ids.length ? "collections" : "all",
       collection_ids: ids,
@@ -284,20 +343,19 @@ export function ChatWorkspace({ conversationId }: { conversationId?: string }) {
     }
   }
   return (
+    <div className="flex h-full min-h-0 min-w-0">
     <section
       className={`flex min-w-0 flex-1 flex-col ${isNew ? "min-h-full justify-center px-4 pb-24" : "h-full min-h-0 overflow-hidden px-4 py-8 sm:px-8"}`}
     >
       <StatusRegion>{phaseAnnouncement(phase)}</StatusRegion>
       {detail.isLoading ? (
         <div className="flex min-h-0 flex-1 flex-col">
-          <header className="mb-5 shrink-0">
-            <p className="text-sm font-medium text-primary">Conversation</p>
-            <h1 className="mt-2 text-3xl font-semibold tracking-tight">Loading conversation</h1>
-          </header>
           <div className="min-h-0 flex-1 overflow-y-auto pr-1"><TranscriptSkeleton /></div>
-          <form className="mt-6 shrink-0 flex w-full flex-wrap gap-2" onSubmit={(event) => event.preventDefault()}>
-            <textarea aria-label="Chat message" className="min-h-14 min-w-0 flex-1 resize-y rounded-xl border border-border bg-background p-4" disabled placeholder="Loading conversation…" />
-            <button className="rounded-xl bg-primary px-4 py-2 text-primary-foreground disabled:opacity-50" disabled type="submit">Send</button>
+          <form className="mt-4 shrink-0 flex w-full items-end gap-2" onSubmit={(event) => event.preventDefault()}>
+            <div className="flex min-w-0 flex-1 items-end rounded-2xl border border-border bg-card p-1.5 shadow-sm">
+              <textarea aria-label="Chat message" className="min-h-10 min-w-0 flex-1 resize-y bg-transparent px-3 py-2 outline-none" disabled placeholder="Loading conversation…" />
+              <button aria-label="Send message" className="grid h-10 w-10 shrink-0 place-items-center rounded-full bg-primary text-primary-foreground disabled:opacity-50" disabled type="submit"><ArrowUpIcon /></button>
+            </div>
           </form>
         </div>
       ) : detail.error ? (
@@ -309,21 +367,13 @@ export function ChatWorkspace({ conversationId }: { conversationId?: string }) {
         </div>
       ) : (
         <>
-          <header className={`${isNew ? "mx-auto mb-8 max-w-2xl text-center" : "mb-5 shrink-0"}`}>
-            <p className="text-sm font-medium text-primary">
-              {isNew ? "Meridian" : "Conversation"}
-            </p>
-            <h1 className="mt-2 text-3xl font-semibold tracking-tight">
-              {isNew
-                ? "Every answer, precisely located."
-                : (detail.data?.title ?? "Untitled conversation")}
-            </h1>
-            {isNew ? (
-              <p className="mt-3 text-muted-foreground">
-                Ask a question grounded in your documents.
-              </p>
-            ) : null}
-          </header>
+          {isNew ? (
+            <header className="mx-auto mb-8 max-w-2xl text-center">
+              <p className="text-sm font-medium text-primary">Meridian</p>
+              <h1 className="mt-2 text-3xl font-semibold tracking-tight">Every answer, precisely located.</h1>
+              <p className="mt-3 text-muted-foreground">Ask a question grounded in your documents.</p>
+            </header>
+          ) : null}
           {error ? (
             <div className="mx-auto mb-4 w-full max-w-3xl">
               <ApiFeedback
@@ -344,94 +394,130 @@ export function ChatWorkspace({ conversationId }: { conversationId?: string }) {
               Retry last question
             </button>
           ) : null}
-          <ScopeControl
-            collectionNames={collectionNames}
-            collections={collections.data?.collections ?? []}
-            loading={scopeLoading}
-            unavailable={scopeUnavailable}
-            scope={scope}
-            setCollectionIds={setCollectionIds}
-            compact={isNew}
-          />
           <div
-            className={`w-full ${isNew ? "mx-auto max-w-3xl" : "min-h-0 flex-1 space-y-4 overflow-y-auto pr-1"}`}
-            aria-busy={streaming || undefined}
-            onScroll={(event) => {
-              const element = event.currentTarget;
-              setNearLatest(element.scrollHeight - element.scrollTop - element.clientHeight < 80);
-            }}
-            ref={isNew ? undefined : transcript}
+            className={`relative w-full ${isNew ? "mx-auto max-w-3xl" : "min-h-0 flex-1"}`}
           >
-            {!isNew && historyPage.hasMore ? (
+            <div
+              className={isNew ? "" : "h-full min-h-0 space-y-4 overflow-y-auto pr-1"}
+              aria-busy={streaming || undefined}
+              data-testid={isNew ? undefined : "conversation-transcript"}
+              onScroll={(event) => {
+                const element = event.currentTarget;
+                setNearLatest(element.scrollHeight - element.scrollTop - element.clientHeight < 80);
+              }}
+              ref={isNew ? undefined : transcript}
+            >
+              {!isNew && historyPage.hasMore ? (
+                <button
+                  className="mb-3 rounded border border-border px-3 py-1 text-sm disabled:opacity-50"
+                  disabled={loadingOlder}
+                  onClick={() => void loadOlderMessages()}
+                  type="button"
+                >
+                  {loadingOlder ? "Loading older messages…" : "Load older messages"}
+                </button>
+              ) : null}
+              {!scopeLoading && !scopeUnavailable && !hasLibrary && !messages.length ? (
+                <EmptyState title="Upload a document to start">
+                  Grounded chat needs ready documents.{" "}
+                  <Link className="underline" href="/documents">
+                    Open documents
+                  </Link>
+                </EmptyState>
+              ) : messages.length ? (
+                <MessageList
+                  messages={messages}
+                  scopeEvents={detail.data?.scope_events ?? []}
+                  collectionNames={collectionNames}
+                  onSelectSources={selectSources}
+                  sourceMessageId={sourceContext?.messageId ?? null}
+                />
+              ) : null}
+            </div>
+            {!isNew && !nearLatest ? (
               <button
-                className="mb-3 rounded border border-border px-3 py-1 text-sm disabled:opacity-50"
-                disabled={loadingOlder}
-                onClick={() => void loadOlderMessages()}
+                aria-label="Jump to latest"
+                className="absolute bottom-4 right-4 z-10 grid h-11 w-11 place-items-center rounded-full border border-border bg-card text-foreground shadow-lg transition-all hover:-translate-y-0.5 hover:bg-muted hover:shadow-xl focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 active:translate-y-0"
+                onClick={() => {
+                  const element = transcript.current;
+                  if (element) {
+                    element.scrollTop = element.scrollHeight;
+                    setNearLatest(true);
+                  }
+                }}
+                title="Jump to latest"
                 type="button"
               >
-                {loadingOlder ? "Loading older messages…" : "Load older messages"}
+                <ArrowDownIcon />
               </button>
             ) : null}
-            {!scopeLoading && !scopeUnavailable && !hasLibrary && !messages.length ? (
-              <EmptyState title="Upload a document to start">
-                Grounded chat needs ready documents.{" "}
-                <Link className="underline" href="/documents">
-                  Open documents
-                </Link>
-              </EmptyState>
-            ) : messages.length ? (
-              <MessageList
-                messages={messages}
-                scopeEvents={detail.data?.scope_events ?? []}
-                collectionNames={collectionNames}
-              />
-            ) : null}
           </div>
-          {!isNew && !nearLatest ? (
-            <button
-              className="mb-2 self-end rounded border border-border px-3 py-1 text-sm"
-              onClick={() => {
-                const element = transcript.current;
-                if (element) {
-                  element.scrollTop = element.scrollHeight;
-                  setNearLatest(true);
-                }
-              }}
-              type="button"
-            >
-              Jump to latest
-            </button>
-          ) : null}
           <form
-            className={`mt-6 shrink-0 flex w-full flex-wrap gap-2 ${isNew ? "mx-auto max-w-3xl" : ""}`}
+            className={`relative mt-4 shrink-0 flex w-full items-end gap-2 ${isNew ? "mx-auto max-w-3xl" : ""}`}
             onSubmit={submit}
           >
-            <textarea
-              aria-label="Chat message"
-              className="min-h-14 max-h-40 min-w-0 flex-1 resize-y overflow-y-auto rounded-xl border border-border bg-background p-4"
-              disabled={streaming || scopeLoading || scopeUnavailable || !hasLibrary}
-              value={query}
-              onChange={(event) => setQuery(event.target.value)}
-              placeholder={
-                scopeLoading
-                  ? "Loading available collections…"
-                  : scopeUnavailable
-                    ? "Collection choices are unavailable"
-                    : hasLibrary
-                      ? "Ask about your documents"
-                      : "Upload documents to enable chat"
-              }
-            />
-            <button
-              className="rounded-xl bg-primary px-4 py-2 text-primary-foreground disabled:opacity-50"
-              disabled={streaming || scopeLoading || scopeUnavailable || !query.trim() || !hasLibrary}
-              type="submit"
-            >
-              {streaming ? (phase === "streaming" ? "Generating…" : "Searching…") : "Send"}
-            </button>
+            <div className="flex min-w-0 flex-1 items-end rounded-2xl border border-border bg-card p-1.5 shadow-sm focus-within:border-primary">
+              <textarea
+                aria-label="Chat message"
+                className="min-h-10 max-h-28 min-w-0 flex-1 resize-none overflow-y-auto bg-transparent px-3 py-2 outline-none"
+                disabled={streaming || scopeLoading || scopeUnavailable || !hasLibrary}
+                ref={composer}
+                value={query}
+                onChange={(event) => setQuery(event.target.value)}
+                placeholder={
+                  scopeLoading
+                    ? "Loading available collections…"
+                    : scopeUnavailable
+                      ? "Collection choices are unavailable"
+                      : hasLibrary
+                        ? "Ask about your documents"
+                        : "Upload documents to enable chat"
+                }
+              />
+              <button
+                aria-label="Send message"
+                aria-busy={streaming || undefined}
+                className="grid h-10 w-10 shrink-0 place-items-center rounded-full bg-primary text-primary-foreground disabled:cursor-not-allowed disabled:opacity-50"
+                disabled={streaming || scopeLoading || scopeUnavailable || !query.trim() || !hasLibrary}
+                title={streaming ? (phase === "streaming" ? "Generating response" : "Searching documents") : "Send message"}
+                type="submit"
+              >
+                <ArrowUpIcon />
+              </button>
+            </div>
+            <div className="relative shrink-0">
+              <button
+                aria-controls="retrieval-scope-panel"
+                aria-expanded={scopeOpen}
+                aria-label={scopeTriggerLabel(scope, scopeLoading, scopeUnavailable)}
+                className="relative grid h-11 w-11 place-items-center rounded-full border border-border bg-card shadow-sm transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
+                disabled={!scopeEditable}
+                onClick={() => setScopeOpen((open) => !open)}
+                ref={scopeTrigger}
+                title={scopeLoading ? "Loading retrieval scope" : scopeUnavailable ? "Retrieval scope unavailable" : "Manage retrieval scope"}
+                type="button"
+              >
+                <ScopeIcon />
+                {scope.mode === "collections" ? (
+                  <span aria-hidden="true" className="absolute -right-1 -top-1 grid h-4 min-w-4 place-items-center rounded-full bg-primary px-1 text-[10px] font-semibold text-primary-foreground">
+                    {scope.collection_ids.length}
+                  </span>
+                ) : null}
+              </button>
+              {scopeOpen ? (
+                <ScopeOverlay
+                  collectionNames={collectionNames}
+                  collections={collections.data?.collections ?? []}
+                  onClose={() => setScopeOpen(false)}
+                  scope={scope}
+                  setCollectionIds={setCollectionIds}
+                  overlayRef={scopeOverlay}
+                />
+              ) : null}
+            </div>
             {streaming ? (
               <button
-                className="rounded-xl border border-border px-3 py-2"
+                className="h-11 shrink-0 rounded-full border border-border px-4 text-sm"
                 onClick={stopStream}
                 type="button"
               >
@@ -439,17 +525,17 @@ export function ChatWorkspace({ conversationId }: { conversationId?: string }) {
               </button>
             ) : null}
           </form>
-          {!isNew ? (
-            <button
-              className="mt-5 shrink-0 self-start text-sm text-muted-foreground underline"
-              onClick={() => setConfirmDelete(true)}
-              type="button"
-            >
-              Delete conversation
-            </button>
-          ) : null}
+          {!isNew ? <button className="mt-3 shrink-0 self-start text-xs text-muted-foreground underline" onClick={() => setConfirmDelete(true)} type="button">Delete conversation</button> : null}
         </>
       )}
+    </section>
+      {sourceContext ? (
+        <ChatSourcesPane
+          messageId={sourceContext.messageId}
+          onClose={closeSources}
+          sources={sourceContext.sources}
+        />
+      ) : null}
       <ConfirmDialog
         confirmLabel="Delete conversation"
         onCancel={() => setConfirmDelete(false)}
@@ -459,43 +545,53 @@ export function ChatWorkspace({ conversationId }: { conversationId?: string }) {
       >
         This cannot be undone.
       </ConfirmDialog>
-    </section>
+    </div>
   );
 }
 
-function ScopeControl({
+function ScopeOverlay({
   collections,
   collectionNames,
   scope,
   setCollectionIds,
-  compact,
-  loading,
-  unavailable,
+  onClose,
+  overlayRef,
 }: {
   collections: NonNullable<CollectionListResponse["collections"]>;
   collectionNames: Map<string, string>;
   scope: RetrievalScopeResponse;
   setCollectionIds: (ids: string[]) => void;
-  compact: boolean;
-  loading: boolean;
-  unavailable: boolean;
+  onClose: () => void;
+  overlayRef: React.RefObject<HTMLDivElement>;
 }) {
   const selected = scope.collection_ids;
   return (
-    <section
-      className={`w-full shrink-0 ${compact ? "mx-auto mb-3 max-w-3xl" : "mb-5"} rounded border border-border p-3`}
-    >
-      <p className="text-sm font-medium">
-        Retrieval scope: {scope.mode === "all" ? "All documents" : "Selected collections"}
-      </p>
-      {loading ? <p className="mt-1 text-xs text-muted-foreground">Loading available collections…</p> : null}
-      {unavailable ? (
-        <p className="mt-1 text-xs text-muted-foreground">Collection choices are temporarily unavailable.</p>
-      ) : null}
+    <>
+      <div aria-hidden="true" className="fixed inset-0 z-20 bg-foreground/10 sm:hidden" onClick={onClose} />
+      <section
+        aria-label="Retrieval scope"
+        className="fixed inset-x-3 bottom-20 z-30 max-h-[min(28rem,calc(100dvh-6rem))] overflow-y-auto rounded-2xl border border-border bg-card p-4 shadow-xl sm:absolute sm:inset-auto sm:bottom-full sm:right-0 sm:mb-3 sm:w-96"
+        id="retrieval-scope-panel"
+        onKeyDown={(event) => {
+          if (event.key === "Escape") {
+            event.preventDefault();
+            onClose();
+          }
+        }}
+        ref={overlayRef}
+        role="dialog"
+        tabIndex={-1}
+      >
+      <div className="flex items-start justify-between gap-4 border-b border-border pb-3">
+        <div className="min-w-0">
+          <h2 className="text-sm font-semibold">Retrieval scope</h2>
+          <p className="mt-1 text-xs text-muted-foreground">{scopeSummary(scope)} for your next answer</p>
+        </div>
+        <button aria-label="Close retrieval scope" className="rounded p-1 text-muted-foreground transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary" onClick={onClose} type="button">×</button>
+      </div>
       <select
         aria-label="Add collection to chat scope"
-        className="mt-2 rounded border border-border p-2 text-sm"
-        disabled={loading || unavailable}
+        className="mt-4 w-full rounded border border-border bg-background p-2 text-sm"
         value=""
         onChange={(event) => {
           const id = event.target.value;
@@ -512,11 +608,10 @@ function ScopeControl({
           ))}
       </select>
       {selected.length ? (
-        <div className="mt-2 flex flex-wrap gap-2">
+        <div className="mt-3 flex flex-wrap gap-2">
           {selected.map((id) => (
             <button
-              className="rounded-full bg-muted px-2 py-1 text-xs"
-              disabled={loading || unavailable}
+              className="rounded-full bg-muted px-2 py-1 text-xs hover:bg-muted/70"
               key={id}
               onClick={() => setCollectionIds(selected.filter((item) => item !== id))}
               type="button"
@@ -524,22 +619,53 @@ function ScopeControl({
               {collectionNames.get(id) ?? "Unavailable collection"} ×
             </button>
           ))}
-          <button className="text-xs underline disabled:opacity-50" disabled={loading || unavailable} onClick={() => setCollectionIds([])} type="button">
+          <button className="text-xs underline" onClick={() => setCollectionIds([])} type="button">
             Clear to all documents
           </button>
         </div>
-      ) : null}
-    </section>
+      ) : <p className="mt-3 text-sm text-muted-foreground">All ready documents are included.</p>}
+      </section>
+    </>
   );
+}
+
+function scopeSummary(scope: RetrievalScopeResponse): string {
+  return scope.mode === "all" ? "All documents" : `${scope.collection_ids.length} selected collection${scope.collection_ids.length === 1 ? "" : "s"}`;
+}
+
+function scopeTriggerLabel(
+  scope: RetrievalScopeResponse,
+  loading: boolean,
+  unavailable: boolean
+): string {
+  if (loading) return "Retrieval scope: loading collection choices";
+  if (unavailable) return "Retrieval scope unavailable";
+  return `Manage retrieval scope: ${scopeSummary(scope)}`;
+}
+
+function ArrowUpIcon() {
+  return <svg aria-hidden="true" fill="none" height="18" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" viewBox="0 0 24 24" width="18"><path d="M12 19V5M5 12l7-7 7 7" /></svg>;
+}
+
+function ArrowDownIcon() {
+  return <svg aria-hidden="true" fill="none" height="18" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" viewBox="0 0 24 24" width="18"><path d="M12 5v14m7-7-7 7-7-7" /></svg>;
+}
+
+function ScopeIcon() {
+  return <svg aria-hidden="true" fill="none" height="19" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.8" viewBox="0 0 24 24" width="19"><path d="M4 6h16M7 12h10M10 18h4" /><circle cx="8" cy="6" fill="currentColor" r="1.4" /><circle cx="15" cy="12" fill="currentColor" r="1.4" /><circle cx="11" cy="18" fill="currentColor" r="1.4" /></svg>;
 }
 function MessageList({
   messages,
   scopeEvents,
   collectionNames,
+  onSelectSources,
+  sourceMessageId,
 }: {
   messages: LiveMessage[];
   scopeEvents: ConversationScopeEventResponse[];
   collectionNames: Map<string, string>;
+  onSelectSources: (messageId: string, sources: SourceCitation[], trigger: HTMLButtonElement) => void;
+  sourceMessageId: string | null;
 }) {
   let sequence = 0;
   return (
@@ -575,11 +701,19 @@ function MessageList({
               </p>
               {message.role === "assistant" && message.provisional && !message.content ? (
                 <p aria-busy="true" className="text-muted-foreground">Searching your documents…</p>
+              ) : message.role === "assistant" ? (
+                <MarkdownAnswer content={message.content || "…"} />
               ) : (
                 <p className="whitespace-pre-wrap">{message.content || "…"}</p>
               )}
-              {message.role === "assistant" && message.sources ? (
-                <Sources sources={message.sources} />
+              {message.role === "assistant" && !message.provisional ? (
+                <ResponseActions
+                  content={message.content}
+                  messageId={message.id}
+                  onSelectSources={onSelectSources}
+                  sourcesOpen={sourceMessageId === message.id}
+                  sources={message.sources ?? message.citations.sources ?? []}
+                />
               ) : null}
             </article>
           </div>
@@ -597,30 +731,75 @@ function phaseAnnouncement(phase: ChatPhase): string {
   if (phase === "failed") return "Meridian could not complete the response. Your question is ready to retry.";
   return "";
 }
-function Sources({ sources }: { sources: SourceCitation[] }) {
-  if (!sources.length)
-    return (
-      <p className="mt-3 text-sm text-muted-foreground">
-        No supporting sources were found; this is a completed grounded response.
-      </p>
-    );
+
+function MarkdownAnswer({ content }: { content: string }) {
   return (
-    <details className="mt-3">
-      <summary className="cursor-pointer text-sm font-medium">Sources ({sources.length})</summary>
-      <div className="mt-2 grid gap-2">
-        {sources.map((source) => (
-          <article
-            className="break-words rounded border border-border p-2 text-sm"
-            key={`${source.document_id}:${source.chunk_id}`}
-          >
-            <p className="font-medium">
-              {source.filename}
-              {source.page_number ? ` · page ${source.page_number}` : ""}
-            </p>
-            <p className="mt-1 text-muted-foreground">{source.excerpt}</p>
-          </article>
-        ))}
-      </div>
-    </details>
+    <div className="break-words text-sm leading-6 [&_a]:text-primary [&_a]:underline [&_a]:underline-offset-2 [&_blockquote]:my-3 [&_blockquote]:border-l-2 [&_blockquote]:border-primary/40 [&_blockquote]:pl-3 [&_code]:rounded [&_code]:bg-muted [&_code]:px-1 [&_code]:py-0.5 [&_code]:font-mono [&_h1]:mb-3 [&_h1]:text-xl [&_h1]:font-semibold [&_h2]:mb-2 [&_h2]:mt-5 [&_h2]:text-lg [&_h2]:font-semibold [&_h3]:mb-2 [&_h3]:mt-4 [&_h3]:font-medium [&_li]:my-1 [&_ol]:my-3 [&_ol]:list-decimal [&_ol]:pl-6 [&_p]:my-3 [&_p:first-child]:mt-0 [&_p:last-child]:mb-0 [&_pre]:my-3 [&_pre]:overflow-x-auto [&_pre]:rounded-lg [&_pre]:bg-muted [&_pre]:p-3 [&_pre_code]:bg-transparent [&_pre_code]:p-0 [&_table]:my-3 [&_table]:w-full [&_table]:border-collapse [&_td]:border [&_td]:border-border [&_td]:p-2 [&_th]:border [&_th]:border-border [&_th]:bg-muted [&_th]:p-2 [&_ul]:my-3 [&_ul]:list-disc [&_ul]:pl-6">
+      <ReactMarkdown remarkPlugins={[remarkGfm]} skipHtml>
+        {content}
+      </ReactMarkdown>
+    </div>
   );
+}
+
+function ResponseActions({
+  content,
+  messageId,
+  onSelectSources,
+  sourcesOpen,
+  sources,
+}: {
+  content: string;
+  messageId: string;
+  onSelectSources: (messageId: string, sources: SourceCitation[], trigger: HTMLButtonElement) => void;
+  sourcesOpen: boolean;
+  sources: SourceCitation[];
+}) {
+  const [copied, setCopied] = useState(false);
+
+  async function copyResponse() {
+    try {
+      await navigator.clipboard.writeText(content);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1800);
+    } catch {
+      setCopied(false);
+    }
+  }
+
+  return (
+    <div className="mt-4 flex items-center gap-1 border-t border-border pt-2">
+      <button
+        aria-label="Copy response"
+        className="inline-flex h-8 items-center gap-1.5 rounded-md px-2 text-xs text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary"
+        onClick={() => void copyResponse()}
+        title="Copy response"
+        type="button"
+      >
+        <CopyIcon />
+        <span>{copied ? "Copied" : "Copy"}</span>
+      </button>
+      <button
+        aria-controls="chat-sources-inspector"
+        aria-expanded={sourcesOpen}
+        aria-label="Sources"
+        className="inline-flex h-8 items-center gap-1.5 rounded-md px-2 text-xs text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary"
+        onClick={(event) => onSelectSources(messageId, sources, event.currentTarget)}
+        title="View sources"
+        type="button"
+      >
+        <SourcesIcon />
+        <span>Sources</span>
+        {sources.length ? <span className="text-muted-foreground">({sources.length})</span> : null}
+      </button>
+    </div>
+  );
+}
+
+function CopyIcon() {
+  return <svg aria-hidden="true" fill="none" height="15" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.8" viewBox="0 0 24 24" width="15"><rect height="13" rx="2" width="13" x="8" y="8" /><path d="M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h3" /></svg>;
+}
+
+function SourcesIcon() {
+  return <svg aria-hidden="true" fill="none" height="15" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.8" viewBox="0 0 24 24" width="15"><path d="M4 6.5A2.5 2.5 0 0 1 6.5 4H11v15H6.5A2.5 2.5 0 0 0 4 21.5v-15ZM20 6.5A2.5 2.5 0 0 0 17.5 4H13v15h4.5a2.5 2.5 0 0 1 2.5 2.5v-15Z" /></svg>;
 }

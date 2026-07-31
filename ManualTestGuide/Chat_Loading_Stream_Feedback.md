@@ -10,19 +10,20 @@ Sign in with an account that has at least one ready document.
    - The message area shows a transcript-shaped loading skeleton, and the composer remains in its
      normal bottom position but is disabled until conversation data resolves.
 2. Open **New chat** while collections are loading (throttle the network in browser DevTools).
-   - The retrieval scope says `Loading available collections…`.
+   - The composer placeholder says `Loading available collections…` and the circular scope control
+     is disabled with the accessible label `Retrieval scope: loading collection choices`.
    - Adding or removing collection scope is disabled until choices resolve.
-   - If the collection request fails, the scope identifies that collection choices are unavailable;
-     chat entry remains disabled instead of silently using an ambiguous scope.
+   - If the collection request fails, the scope control identifies that collection choices are
+     unavailable; chat entry remains disabled instead of silently using an ambiguous scope.
 
 ## Streaming lifecycle
 
 1. Send a question grounded in a ready document.
    - Your message and a Meridian bubble appear immediately.
-   - Before text arrives, the assistant bubble says `Searching your documents…`, Send changes to
-     `Searching…`, and Stop is available.
-   - When text begins, the same assistant bubble receives streamed content and Send changes to
-     `Generating…`. There is no fake percentage or global spinner.
+   - Before text arrives, the assistant bubble says `Searching your documents…`, the circular
+     arrow Send control and scope control are disabled, and Stop is available.
+   - When text begins, the same assistant bubble receives streamed content. There is no fake
+     percentage or global spinner.
    - At completion, entry is restored and a screen-reader status announces completion once.
 2. Click **Stop** before completion.
    - Entry is restored, the assistant message is labelled `stopped`, and **Retry last question**

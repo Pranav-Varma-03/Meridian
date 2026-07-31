@@ -10,7 +10,15 @@
 
 1. Open `/chat`; select **New chat** and leave the scope as **All documents**.
 2. Send a grounded question. Confirm your turn appears immediately and the assistant text grows while the request is open.
-3. Expand **Sources** after completion. Confirm filename, page when available, heading, excerpt, and score come from the API response.
+   - Verify Meridian answers render Markdown rather than displaying Markdown markers literally: headings,
+     lists, bold/italic text, links, tables, quotes, and inline or fenced code should be formatted.
+   - Raw HTML returned by the model must not become executable or rendered page markup.
+3. Select **Sources** after completion. Confirm a right-side Sources pane opens for that exact answer.
+   - Each citation starts collapsed and shows its filename, page when available, and section heading when available.
+   - Expand two citations and confirm both stored excerpts remain visible for comparison. Citation excerpts are plain text, not rendered Markdown or HTML.
+   - Select **Sources** on another answer. The pane updates to that answer's source list without another chat request. Select Sources again on the active answer, use the close button, or press Escape to close it.
+   - Reopen an older conversation and repeat the check. Its citations must be the saved evidence snapshot; if a source is marked no longer active, its historical excerpt remains visible with that status.
+   - On a narrow viewport, confirm Sources opens as a right-side modal drawer. Focus enters the drawer, Tab stays within it, and closing returns focus to the Sources control.
 4. Ask an unsupported question. If the backend returns an empty source list, confirm the completed grounded response says that evidence was insufficient rather than presenting an error.
 5. Stop a live response. Confirm the provisional answer is marked incomplete and the question can be placed back in the composer through retry feedback.
 

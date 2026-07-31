@@ -159,8 +159,7 @@ export function DocumentLibrary({ canReingest }: { canReingest: boolean }) {
       <p className="text-sm font-medium text-primary">Library</p>
       <h1 className="mt-2 text-3xl font-semibold tracking-tight">Documents</h1>
       <p className="mt-3 max-w-3xl text-muted-foreground">
-        Manage uploaded knowledge. A deletion hides the document immediately; background cleanup
-        removes its file and vectors safely.
+        Manage uploaded knowledge.
       </p>
       <div className="mt-6 flex flex-wrap items-end gap-3">
         <label className="grid gap-1 text-sm font-medium">

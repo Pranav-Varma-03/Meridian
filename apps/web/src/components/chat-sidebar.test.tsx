@@ -7,7 +7,7 @@ import { ChatSidebar } from "./chat-sidebar";
 vi.mock("next/navigation", () => ({ usePathname: () => "/chat" }));
 
 describe("ChatSidebar", () => {
-  it("persists compact mode and restores account-trigger focus after Escape", async () => {
+  it("persists compact mode and restores the icon-only account trigger after Escape", async () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(async () => Response.json({ conversations: [], total: 0 }))
@@ -22,6 +22,7 @@ describe("ChatSidebar", () => {
     );
     expect(screen.getByRole("complementary", { name: "Chat navigation" })).toHaveClass("h-full");
     expect(screen.getByRole("link", { name: "Meridian new chat" })).toHaveAttribute("href", "/new");
+    expect(screen.getByText("Account & permissions")).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Chat" })).toHaveAttribute("href", "/chat");
     expect(screen.getByRole("link", { name: "Documents" })).toHaveAttribute("href", "/documents");
     expect(screen.getByRole("link", { name: "Collections" })).toHaveAttribute(
@@ -30,10 +31,16 @@ describe("ChatSidebar", () => {
     );
     fireEvent.click(screen.getByRole("button", { name: "Collapse chat sidebar" }));
     expect(window.localStorage.getItem("meridian-chat-sidebar")).toBe("collapsed");
-    fireEvent.click(screen.getByRole("button", { name: "@" }));
+    expect(screen.getByRole("button", { name: "Expand chat sidebar" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Account menu" }));
     expect(await screen.findByText("documents:reingest")).toBeInTheDocument();
     fireEvent.keyDown(window, { key: "Escape" });
     expect(screen.queryByText("documents:reingest")).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "@" })).toHaveFocus();
+    expect(screen.getByRole("button", { name: "Account menu" })).toHaveFocus();
+
+    fireEvent.click(screen.getByRole("button", { name: "Account menu" }));
+    expect(await screen.findByText("documents:reingest")).toBeInTheDocument();
+    fireEvent.pointerDown(screen.getByRole("link", { name: "Chat" }));
+    expect(screen.queryByText("documents:reingest")).not.toBeInTheDocument();
   });
 });

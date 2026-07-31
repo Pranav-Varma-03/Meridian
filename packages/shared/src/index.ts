@@ -135,6 +135,9 @@ export interface SourceCitation {
   excerpt: string;
   content_sha256: string;
   score: number;
+  /** Present on persisted conversation citations when the cited generation is no longer active. */
+  available?: boolean;
+  unavailable_reason?: string;
 }
 
 export interface ConversationMessage {
