@@ -1,0 +1,3 @@
+Exception Policy
+
+Policy exceptions require the Finance Director's approval. The exception request must name the business reason.

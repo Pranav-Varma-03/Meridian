@@ -1,0 +1,3 @@
+Retention Policy B
+
+Customer records must be retained for five years after account closure.

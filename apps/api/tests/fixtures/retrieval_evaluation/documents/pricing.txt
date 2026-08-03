@@ -1,0 +1,5 @@
+Pricing Table
+
+Starter plan: 25 seats.
+Growth plan: 100 seats.
+Enterprise plan: 250 seats.

@@ -1,0 +1,28 @@
+Meridian Retrieval Evaluation Corpus
+
+Travel Policy
+TRV-104 requires employees to obtain manager approval before booking international travel. The approval must be recorded before purchase.
+
+Service Contract
+4.2(b) The customer must give written notice within ten business days after discovering a material service failure.
+
+Pricing Table
+Starter plan: 25 seats.
+Growth plan: 100 seats.
+Enterprise plan: 250 seats.
+
+Exception Policy
+Policy exceptions require the Finance Director's approval. The exception request must name the business reason.
+
+Master Services Agreement
+Renewal: Either party must provide 60 days' written notice before a renewal date to prevent automatic renewal.
+Termination: Either party may terminate for convenience with 30 days' written notice.
+
+Retention Policy A
+Customer records must be retained for seven years after account closure.
+
+Retention Policy B
+Customer records must be retained for five years after account closure.
+
+Onboarding Guide
+This onboarding guide supersedes the old onboarding checklist issued in 2024.

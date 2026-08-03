@@ -1,0 +1,3 @@
+Service Contract
+
+4.2(b) The customer must give written notice within ten business days after discovering a material service failure.
