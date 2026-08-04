@@ -1,6 +1,6 @@
 import json
 from functools import lru_cache
-from typing import Annotated
+from typing import Annotated, Literal
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from pydantic import Field, field_validator, model_validator
@@ -72,6 +72,34 @@ class Settings(BaseSettings):
     contextual_embedding_enabled: bool = False
     contextual_chunking_provider: str = "native"
     contextual_chunking_model: str | None = None
+
+    # Versioned structured-ingestion and retrieval rollout controls. The safe
+    # default keeps the currently active dense retrieval behavior unchanged.
+    document_parser_provider: Literal["unstructured", "compatibility"] = "unstructured"
+    document_parser_fallback_provider: Literal["compatibility"] = "compatibility"
+    document_parser_version: str = "unstructured_by_title_v1"
+    ingestion_tokenizer_version: str = "cl100k_base"
+    chunk_strategy_version: str = "structure_aware_parent_child_v1"
+    chunk_child_target_tokens: int = Field(default=384, gt=0, le=512)
+    chunk_child_max_tokens: int = Field(default=512, gt=0, le=2048)
+    chunk_child_overlap_tokens: int = Field(default=48, ge=0, le=512)
+    chunk_parent_target_tokens: int = Field(default=900, gt=0, le=1200)
+    chunk_parent_max_tokens: int = Field(default=1200, gt=0, le=4096)
+    embedding_text_version: str = "document_section_locator_v1"
+    lexical_backend: Literal["postgresql"] = "postgresql"
+    lexical_index_version: str = "postgres_simple_v1"
+    dense_index_version: str = "dense_child_v1"
+    retrieval_mode: Literal["dense", "hybrid_shadow", "hybrid"] = "dense"
+    retrieval_expansion_enabled: bool = False
+    lexical_degradation_mode: Literal["fail", "dense_only"] = "fail"
+    retrieval_fusion_version: str = "weighted_rrf_v1"
+    retrieval_rrf_k: int = Field(default=60, gt=0, le=1000)
+    retrieval_dense_weight: float = Field(default=1.0, gt=0, le=10)
+    retrieval_lexical_weight: float = Field(default=1.0, gt=0, le=10)
+    reranking_enabled: bool = False
+    reranking_shadow_enabled: bool = False
+    reranker_version: str = "none_v1"
+    prompt_policy_version: str = "source_only_v1"
 
     # Pinecone
     pinecone_api_key: str
@@ -211,6 +239,26 @@ class Settings(BaseSettings):
             raise ValueError("EMBEDDING_MODEL must be a non-empty string")
         return normalized
 
+    @field_validator(
+        "document_parser_version",
+        "ingestion_tokenizer_version",
+        "chunk_strategy_version",
+        "embedding_text_version",
+        "lexical_index_version",
+        "dense_index_version",
+        "retrieval_fusion_version",
+        "reranker_version",
+        "prompt_policy_version",
+    )
+    @classmethod
+    def validate_version_identifier(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("Version identifiers must be non-empty strings")
+        if len(normalized) > 128:
+            raise ValueError("Version identifiers must be at most 128 characters")
+        return normalized
+
     @field_validator("chat_model")
     @classmethod
     def validate_chat_model(cls, value: str) -> str:
@@ -293,6 +341,26 @@ class Settings(BaseSettings):
             raise ValueError(
                 "CHAT_SOURCE_MIN_TOKENS exceeds available chat input capacity"
             )
+        if self.chunk_child_target_tokens > self.chunk_child_max_tokens:
+            raise ValueError(
+                "CHUNK_CHILD_TARGET_TOKENS must not exceed CHUNK_CHILD_MAX_TOKENS"
+            )
+        if self.chunk_child_overlap_tokens >= self.chunk_child_max_tokens:
+            raise ValueError(
+                "CHUNK_CHILD_OVERLAP_TOKENS must be below CHUNK_CHILD_MAX_TOKENS"
+            )
+        if self.chunk_parent_target_tokens > self.chunk_parent_max_tokens:
+            raise ValueError(
+                "CHUNK_PARENT_TARGET_TOKENS must not exceed CHUNK_PARENT_MAX_TOKENS"
+            )
+        if (
+            self.retrieval_mode == "hybrid"
+            and self.lexical_degradation_mode == "dense_only"
+        ):
+            # Explicit degradation is permitted in live hybrid mode, but callers
+            # must opt into it with this named setting rather than silently falling
+            # back as a side effect of a dependency error.
+            pass
         return self
 
 

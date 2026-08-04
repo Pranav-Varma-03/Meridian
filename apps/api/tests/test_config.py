@@ -2,40 +2,11 @@ import pytest
 from pydantic import ValidationError
 
 from app.core.config import Settings
-
-
-def _set_required_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("APP_NAME", "Meridian API")
-    monkeypatch.setenv("ENVIRONMENT", "test")
-    monkeypatch.setenv("DEBUG", "false")
-    monkeypatch.setenv("API_V1_PREFIX", "/api/v1")
-    monkeypatch.setenv("LOG_LEVEL", "INFO")
-    monkeypatch.setenv("CORS_ORIGINS", '["http://localhost:3000"]')
-    monkeypatch.setenv(
-        "DATABASE_URL",
-        "postgresql+asyncpg://test_user:test_password@db.example.com:5432/test_db?sslmode=require",
-    )
-    monkeypatch.setenv("REDIS_URL", "redis://localhost:6379")
-    monkeypatch.setenv("INGESTION_QUEUE_KEY", "ingestion:jobs")
-    monkeypatch.setenv("INGESTION_WORKER_DEQUEUE_TIMEOUT_SECONDS", "5")
-    monkeypatch.setenv("INGESTION_WORKER_MAX_ATTEMPTS", "3")
-    monkeypatch.setenv("INGESTION_WORKER_IDLE_SLEEP_SECONDS", "1.0")
-    monkeypatch.setenv("OPENAI_API_KEY", "test-openai-key")
-    monkeypatch.setenv("OPENROUTER_API_KEY", "test-openrouter-key")
-    monkeypatch.setenv("EMBEDDING_PROVIDER", "pinecone")
-    monkeypatch.setenv("EMBEDDING_MODEL", "llama-text-embed-v2")
-    monkeypatch.setenv("EMBEDDING_INPUT_TYPE", "passage")
-    monkeypatch.setenv("CONTEXTUAL_EMBEDDING_ENABLED", "false")
-    monkeypatch.setenv("CONTEXTUAL_CHUNKING_PROVIDER", "native")
-    monkeypatch.setenv("PINECONE_API_KEY", "test-pinecone-key")
-    monkeypatch.setenv("PINECONE_INDEX_NAME", "test-index")
-    monkeypatch.setenv("AUTH0_DOMAIN", "example.auth0.com")
-    monkeypatch.setenv("AUTH0_AUDIENCE", "https://api.example.com")
-    monkeypatch.setenv("AUTH0_CLIENT_ID", "test-client-id")
+from tests.helpers import set_required_env
 
 
 def test_settings_load_with_required_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    _set_required_env(monkeypatch)
+    set_required_env(monkeypatch)
     monkeypatch.setenv(
         "CORS_ORIGINS",
         '["http://localhost:3000", "https://app.example.com"]',
@@ -56,14 +27,14 @@ def test_settings_load_with_required_env(monkeypatch: pytest.MonkeyPatch) -> Non
 def test_settings_normalizes_openrouter_base_url(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _set_required_env(monkeypatch)
+    set_required_env(monkeypatch)
     monkeypatch.setenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1/")
 
     assert Settings().openrouter_base_url == "https://openrouter.ai/api/v1"
 
 
 def test_settings_reject_non_supabase_ssl_mode(monkeypatch: pytest.MonkeyPatch) -> None:
-    _set_required_env(monkeypatch)
+    set_required_env(monkeypatch)
     monkeypatch.setenv(
         "DATABASE_URL",
         "postgresql+asyncpg://test_user:test_password@db.example.com:5432/test_db",
@@ -74,7 +45,7 @@ def test_settings_reject_non_supabase_ssl_mode(monkeypatch: pytest.MonkeyPatch) 
 
 
 def test_settings_reject_invalid_driver(monkeypatch: pytest.MonkeyPatch) -> None:
-    _set_required_env(monkeypatch)
+    set_required_env(monkeypatch)
     monkeypatch.setenv(
         "DATABASE_URL",
         "mysql://user:pass@localhost:3306/db",
@@ -87,7 +58,7 @@ def test_settings_reject_invalid_driver(monkeypatch: pytest.MonkeyPatch) -> None
 def test_settings_normalize_sslmode_for_asyncpg(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _set_required_env(monkeypatch)
+    set_required_env(monkeypatch)
     monkeypatch.setenv(
         "DATABASE_URL",
         "postgresql://test_user:test_password@db.example.com:5432/test_db?sslmode=require",
@@ -104,7 +75,7 @@ def test_settings_normalize_sslmode_for_asyncpg(
 def test_settings_normalize_channel_binding_for_asyncpg(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _set_required_env(monkeypatch)
+    set_required_env(monkeypatch)
     monkeypatch.setenv(
         "DATABASE_URL",
         "postgresql://test_user:test_password@db.example.com:5432/test_db?channel_binding=require",
@@ -120,10 +91,58 @@ def test_settings_normalize_channel_binding_for_asyncpg(
 def test_settings_require_openai_contextual_config_when_enabled(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _set_required_env(monkeypatch)
+    set_required_env(monkeypatch)
     monkeypatch.setenv("CONTEXTUAL_EMBEDDING_ENABLED", "true")
     monkeypatch.setenv("CONTEXTUAL_CHUNKING_PROVIDER", "openai")
     monkeypatch.delenv("CONTEXTUAL_CHUNKING_MODEL", raising=False)
 
     with pytest.raises(ValidationError):
         Settings()
+
+
+@pytest.mark.parametrize(
+    ("environment_key", "environment_value"),
+    [
+        ("CHUNK_CHILD_TARGET_TOKENS", "513"),
+        ("CHUNK_CHILD_OVERLAP_TOKENS", "512"),
+        ("CHUNK_PARENT_TARGET_TOKENS", "1201"),
+    ],
+)
+def test_settings_reject_invalid_chunk_bounds(
+    monkeypatch: pytest.MonkeyPatch,
+    environment_key: str,
+    environment_value: str,
+) -> None:
+    set_required_env(monkeypatch)
+    monkeypatch.setenv(environment_key, environment_value)
+
+    with pytest.raises(ValidationError):
+        Settings()
+
+
+def test_settings_reject_child_target_larger_than_maximum(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    set_required_env(monkeypatch)
+    monkeypatch.setenv("CHUNK_CHILD_TARGET_TOKENS", "512")
+    monkeypatch.setenv("CHUNK_CHILD_MAX_TOKENS", "384")
+
+    with pytest.raises(ValidationError, match="CHUNK_CHILD_TARGET_TOKENS"):
+        Settings()
+
+
+def test_settings_supports_explicit_hybrid_shadow_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    set_required_env(monkeypatch)
+    monkeypatch.setenv("RETRIEVAL_MODE", "hybrid_shadow")
+    monkeypatch.setenv("RETRIEVAL_EXPANSION_ENABLED", "true")
+    monkeypatch.setenv("LEXICAL_DEGRADATION_MODE", "dense_only")
+    monkeypatch.setenv("RERANKING_SHADOW_ENABLED", "true")
+
+    settings = Settings()
+
+    assert settings.retrieval_mode == "hybrid_shadow"
+    assert settings.retrieval_expansion_enabled is True
+    assert settings.lexical_degradation_mode == "dense_only"
+    assert settings.reranking_shadow_enabled is True

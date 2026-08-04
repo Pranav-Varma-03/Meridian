@@ -6,6 +6,7 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import get_settings
 from app.models.entities import (
     Collection,
     Document,
@@ -21,6 +22,7 @@ from app.models.entities import (
     ReingestionReason,
 )
 from app.services import document_processor
+from app.services.ingestion_configuration import build_generation_configuration
 
 
 class DocumentNotFoundError(Exception):
@@ -131,7 +133,7 @@ async def create_uploaded_document(
                 generation_number=int(latest_generation or 0) + 1,
                 status=GenerationStatus.pending,
                 reason="manual_repair",
-                configuration_json={},
+                configuration_json=build_generation_configuration(get_settings()),
             )
             session.add(generation)
             await session.flush()
@@ -182,7 +184,7 @@ async def create_uploaded_document(
                 generation_number=int(latest_generation or 0) + 1,
                 status=GenerationStatus.pending,
                 reason="manual_repair",
-                configuration_json={},
+                configuration_json=build_generation_configuration(get_settings()),
             )
             session.add(generation)
             await session.flush()
@@ -247,7 +249,7 @@ async def create_uploaded_document(
         generation_number=1,
         status=GenerationStatus.pending,
         reason="upload",
-        configuration_json={},
+        configuration_json=build_generation_configuration(get_settings()),
     )
     session.add(generation)
     await session.flush()
@@ -481,7 +483,7 @@ async def create_ingestion_job(
         generation_number=next_generation_number,
         status=GenerationStatus.pending,
         reason=normalized_reason,
-        configuration_json={},
+        configuration_json=build_generation_configuration(get_settings()),
     )
     session.add(generation)
     await session.flush()

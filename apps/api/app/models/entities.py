@@ -13,7 +13,7 @@ from sqlalchemy import (
     UniqueConstraint,
     func,
 )
-from sqlalchemy.dialects.postgresql import JSONB, UUID
+from sqlalchemy.dialects.postgresql import JSONB, TSVECTOR, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import Base
@@ -170,6 +170,9 @@ class Document(Base):
     chunks: Mapped[list["DocumentChunk"]] = relationship(
         back_populates="document", cascade="all, delete-orphan"
     )
+    parent_windows: Mapped[list["DocumentParentWindow"]] = relationship(
+        back_populates="document", cascade="all, delete-orphan"
+    )
     ingestion_jobs: Mapped[list["IngestionJob"]] = relationship(
         back_populates="document", cascade="all, delete-orphan"
     )
@@ -196,9 +199,32 @@ class DocumentChunk(Base):
     generation_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), nullable=True, index=True
     )
+    parent_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("document_parent_windows.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    previous_chunk_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("document_chunks.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    next_chunk_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("document_chunks.id", ondelete="SET NULL"),
+        nullable=True,
+    )
     chunk_index: Mapped[int] = mapped_column(Integer, nullable=False)
     token_count: Mapped[int] = mapped_column(Integer, nullable=False)
     chunk_text: Mapped[str] = mapped_column(Text, nullable=False)
+    embedding_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    section_path: Mapped[list[str] | None] = mapped_column(JSONB, nullable=True)
+    page_start: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    page_end: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    source_start: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    source_end: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    strategy_version: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    lexical_search: Mapped[object | None] = mapped_column(TSVECTOR, nullable=True)
     vector_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     metadata_json: Mapped[dict] = mapped_column(
         "metadata", JSONB, default=dict, nullable=False
@@ -208,6 +234,66 @@ class DocumentChunk(Base):
     )
 
     document: Mapped[Document] = relationship(back_populates="chunks")
+    parent: Mapped["DocumentParentWindow | None"] = relationship(
+        back_populates="children", foreign_keys=[parent_id]
+    )
+    previous_chunk: Mapped["DocumentChunk | None"] = relationship(
+        foreign_keys=[previous_chunk_id], remote_side=[id], uselist=False
+    )
+    next_chunk: Mapped["DocumentChunk | None"] = relationship(
+        foreign_keys=[next_chunk_id], remote_side=[id], uselist=False
+    )
+
+
+class DocumentParentWindow(Base):
+    __tablename__ = "document_parent_windows"
+    __table_args__ = (
+        UniqueConstraint(
+            "document_id",
+            "generation_id",
+            "parent_index",
+            name="uq_parent_window_generation_order",
+        ),
+        Index(
+            "ix_parent_windows_document_generation_order",
+            "document_id",
+            "generation_id",
+            "parent_index",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    document_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("documents.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    generation_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("document_ingestion_generations.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    parent_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    source_text: Mapped[str] = mapped_column(Text, nullable=False)
+    token_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    section_path: Mapped[list[str]] = mapped_column(JSONB, default=list, nullable=False)
+    page_start: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    page_end: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    source_start: Mapped[int] = mapped_column(Integer, nullable=False)
+    source_end: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    document: Mapped[Document] = relationship(back_populates="parent_windows")
+    generation: Mapped["DocumentIngestionGeneration"] = relationship(
+        back_populates="parent_windows"
+    )
+    children: Mapped[list[DocumentChunk]] = relationship(
+        back_populates="parent", foreign_keys="DocumentChunk.parent_id"
+    )
 
 
 class DocumentIngestionGeneration(Base):
@@ -250,6 +336,9 @@ class DocumentIngestionGeneration(Base):
     )
 
     document: Mapped[Document] = relationship(back_populates="generations")
+    parent_windows: Mapped[list[DocumentParentWindow]] = relationship(
+        back_populates="generation", cascade="all, delete-orphan"
+    )
     vector_manifest: Mapped[list["GenerationVectorManifest"]] = relationship(
         back_populates="generation", cascade="all, delete-orphan"
     )
