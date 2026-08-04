@@ -218,6 +218,10 @@ class DocumentChunk(Base):
     token_count: Mapped[int] = mapped_column(Integer, nullable=False)
     chunk_text: Mapped[str] = mapped_column(Text, nullable=False)
     embedding_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    derived_context_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    derived_context_version: Mapped[str | None] = mapped_column(
+        String(128), nullable=True
+    )
     section_path: Mapped[list[str] | None] = mapped_column(JSONB, nullable=True)
     page_start: Mapped[int | None] = mapped_column(Integer, nullable=True)
     page_end: Mapped[int | None] = mapped_column(Integer, nullable=True)

@@ -207,7 +207,14 @@ async def default_ingestion_processor(
         for persisted_chunk in persisted_chunks:
             contextualized_text = contextualized_lookup.get(persisted_chunk.chunk_index)
             if contextualized_text:
-                persisted_chunk.chunk_text = contextualized_text
+                # Contextualization is model-generated retrieval aid, never source
+                # evidence. Keep it independently versioned so citations and
+                # grounded prompts continue to hydrate immutable `chunk_text`.
+                persisted_chunk.derived_context_text = contextualized_text
+                persisted_chunk.derived_context_version = (
+                    f"{settings.contextual_chunking_provider}:"
+                    f"{settings.contextual_chunking_model or 'native'}"
+                )
             chunks_for_embedding.append(persisted_chunk)
     else:
         chunks_for_embedding = persisted_chunks

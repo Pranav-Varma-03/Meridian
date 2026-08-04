@@ -24,6 +24,15 @@ class VectorDeletionError(Exception):
         self.retryable = retryable
 
 
+def _embedding_text(chunk: DocumentChunk) -> str:
+    """Select retrieval input without ever modifying canonical source evidence."""
+    return (
+        getattr(chunk, "embedding_text", None)
+        or getattr(chunk, "derived_context_text", None)
+        or chunk.chunk_text
+    )
+
+
 def _normalize_metadata(metadata: dict | None) -> dict[str, str | int | float | bool]:
     normalized: dict[str, str | int | float | bool] = {}
     if not metadata:
@@ -63,7 +72,7 @@ async def embed_chunks(
                 "Pinecone client is required for pinecone embedding provider"
             )
 
-        inputs = [{"text": chunk.chunk_text} for chunk in chunks]
+        inputs = [{"text": _embedding_text(chunk)} for chunk in chunks]
         embed_kwargs: dict[str, object] = {
             "model": model,
             "inputs": inputs,
@@ -79,7 +88,7 @@ async def embed_chunks(
         if openai_client is None:
             raise ValueError("OpenAI client is required for openai embedding provider")
 
-        inputs = [chunk.chunk_text for chunk in chunks]
+        inputs = [_embedding_text(chunk) for chunk in chunks]
         response = await openai_client.embeddings.create(model=model, input=inputs)
         response_items = list(response.data)
     else:

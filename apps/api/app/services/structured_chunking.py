@@ -80,20 +80,19 @@ def build_structure_aware_children(
         for fragment in _bounded_element_fragments(
             element, tokenizer, child_max_tokens
         ):
-            fragment_tokens = tokenizer.count(fragment.text)
             changes_section = current and fragment.section_path != current_section
-            exceeds_target = (
-                current and current_tokens + fragment_tokens > child_target_tokens
+            candidate_text = "\n\n".join(
+                [*(item.text for item in current), fragment.text]
             )
-            exceeds_max = (
-                current and current_tokens + fragment_tokens > child_max_tokens
-            )
+            candidate_tokens = tokenizer.count(candidate_text)
+            exceeds_target = current and candidate_tokens > child_target_tokens
+            exceeds_max = current and candidate_tokens > child_max_tokens
             if changes_section or exceeds_target or exceeds_max:
                 flush()
             if not current:
                 current_section = fragment.section_path
             current.append(fragment)
-            current_tokens += fragment_tokens
+            current_tokens = tokenizer.count("\n\n".join(item.text for item in current))
     flush()
 
     # Add overlap only to adjacent children in the same section, and never push a
@@ -173,12 +172,18 @@ def build_parent_windows(
 
     for child in children:
         changes_section = current and child.section_path != current[0].section_path
-        exceeds_max = current and current_tokens + child.token_count > parent_max_tokens
+        candidate_text = "\n\n".join(
+            [*(item.source_text for item in current), child.source_text]
+        )
+        candidate_tokens = tokenizer.count(candidate_text)
+        exceeds_max = current and candidate_tokens > parent_max_tokens
         reaches_target = current and current_tokens >= parent_target_tokens
         if changes_section or exceeds_max or reaches_target:
             flush()
         current.append(child)
-        current_tokens += child.token_count
+        current_tokens = tokenizer.count(
+            "\n\n".join(item.source_text for item in current)
+        )
     flush()
     return assigned, parents
 

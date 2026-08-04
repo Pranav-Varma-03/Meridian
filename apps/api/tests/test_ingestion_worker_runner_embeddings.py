@@ -174,7 +174,13 @@ async def test_default_ingestion_processor_uses_openai_contextual_chunking_when_
     )
 
     chunk_row = types.SimpleNamespace(
-        id=chunk_id, chunk_index=0, chunk_text="plain text", vector_id=None
+        id=chunk_id,
+        chunk_index=0,
+        chunk_text="plain text",
+        vector_id=None,
+        embedding_text=None,
+        derived_context_text=None,
+        derived_context_version=None,
     )
 
     monkeypatch.setattr(
@@ -210,7 +216,8 @@ async def test_default_ingestion_processor_uses_openai_contextual_chunking_when_
     captured_chunks = {}
 
     async def _fake_embed(_chunks):
-        captured_chunks["text"] = _chunks[0].chunk_text
+        captured_chunks["source_text"] = _chunks[0].chunk_text
+        captured_chunks["derived_context"] = _chunks[0].derived_context_text
         return [types.SimpleNamespace(chunk_id=chunk_id, vector_id=f"chunk:{chunk_id}")]
 
     async def _fake_upsert(*, namespace, embedded_chunks):
@@ -258,7 +265,11 @@ async def test_default_ingestion_processor_uses_openai_contextual_chunking_when_
 
     await ingestion_worker_runner.default_ingestion_processor(object(), claimed)
 
-    assert captured_chunks["text"] == "llm contextualized chunk text"
+    assert captured_chunks == {
+        "source_text": "plain text",
+        "derived_context": "llm contextualized chunk text",
+    }
+    assert chunk_row.derived_context_version == "openai:gpt-4o-mini"
     assert chunk_row.vector_id == f"chunk:{chunk_id}"
 
 
@@ -282,7 +293,13 @@ async def test_default_ingestion_processor_uses_contextual_chunks_when_enabled(
     )
 
     chunk_row = types.SimpleNamespace(
-        id=chunk_id, chunk_index=0, chunk_text="plain text", vector_id=None
+        id=chunk_id,
+        chunk_index=0,
+        chunk_text="plain text",
+        vector_id=None,
+        embedding_text=None,
+        derived_context_text=None,
+        derived_context_version=None,
     )
 
     monkeypatch.setattr(
@@ -315,7 +332,8 @@ async def test_default_ingestion_processor_uses_contextual_chunks_when_enabled(
     captured_chunks = {}
 
     async def _fake_embed(_chunks):
-        captured_chunks["text"] = _chunks[0].chunk_text
+        captured_chunks["source_text"] = _chunks[0].chunk_text
+        captured_chunks["derived_context"] = _chunks[0].derived_context_text
         return [types.SimpleNamespace(chunk_id=chunk_id, vector_id=f"chunk:{chunk_id}")]
 
     async def _fake_upsert(*, namespace, embedded_chunks):
@@ -348,5 +366,9 @@ async def test_default_ingestion_processor_uses_contextual_chunks_when_enabled(
 
     await ingestion_worker_runner.default_ingestion_processor(object(), claimed)
 
-    assert captured_chunks["text"] == "contextualized chunk text"
+    assert captured_chunks == {
+        "source_text": "plain text",
+        "derived_context": "contextualized chunk text",
+    }
+    assert chunk_row.derived_context_version == "native:native"
     assert chunk_row.vector_id == f"chunk:{chunk_id}"

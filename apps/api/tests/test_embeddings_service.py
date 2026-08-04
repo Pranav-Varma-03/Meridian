@@ -95,6 +95,36 @@ async def test_embed_chunks_returns_vector_payloads() -> None:
 
 
 @pytest.mark.asyncio
+async def test_embed_chunks_prefers_derived_retrieval_text_without_mutating_source() -> (
+    None
+):
+    class CapturingInference:
+        def __init__(self) -> None:
+            self.inputs = []
+
+        def embed(self, *, model, inputs, parameters=None):
+            _ = model, parameters
+            self.inputs = inputs
+            return types.SimpleNamespace(data=[types.SimpleNamespace(values=[0.1])])
+
+    client = types.SimpleNamespace(inference=CapturingInference())
+    chunk = _DummyChunk(idx=0)
+    chunk.derived_context_text = "derived retrieval context"
+    original_source = chunk.chunk_text
+
+    await embeddings.embed_chunks(
+        provider="pinecone",
+        pinecone_client=client,
+        chunks=[chunk],  # type: ignore[arg-type]
+        model="llama-text-embed-v2",
+        input_type="passage",
+    )
+
+    assert client.inference.inputs == [{"text": "derived retrieval context"}]
+    assert chunk.chunk_text == original_source
+
+
+@pytest.mark.asyncio
 async def test_embed_query_uses_pinecone_query_mode() -> None:
     client = _DummyPineconeForEmbed()
 

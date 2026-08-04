@@ -79,3 +79,63 @@ def test_tables_repeat_headers_and_parent_windows_are_bounded() -> None:
     assert all(parent.token_count <= 48 for parent in parents)
     assert all(child.parent_index is not None for child in assigned)
     assert sum(len(parent.child_indexes) for parent in parents) == len(children)
+
+
+def test_chunking_invariants_hold_for_multiple_input_sizes() -> None:
+    tokenizer = get_tokenizer("cl100k_base")
+    for word_count in (1, 15, 80, 240):
+        text = " ".join(f"term{index}" for index in range(word_count))
+        elements = [
+            _element(text, section=("One",), page=1, start=0),
+            _element(
+                "Second section is isolated.",
+                section=("Two",),
+                page=2,
+                start=len(text) + 1,
+            ),
+        ]
+        children = build_structure_aware_children(
+            elements=elements,
+            tokenizer=tokenizer,
+            document_title="Fixture",
+            child_target_tokens=24,
+            child_max_tokens=32,
+            child_overlap_tokens=4,
+        )
+        assigned, parents = build_parent_windows(
+            children=children,
+            tokenizer=tokenizer,
+            parent_target_tokens=48,
+            parent_max_tokens=64,
+        )
+
+        assert [child.child_index for child in children] == list(range(len(children)))
+        assert all(tokenizer.count(child.source_text) <= 32 for child in children)
+        assert all(parent.token_count <= 64 for parent in parents)
+        assert all(child.parent_index is not None for child in assigned)
+        assert children[-1].page_start == children[-1].page_end == 2
+
+
+def test_children_reconstruct_source_and_keep_list_order_deterministically() -> None:
+    tokenizer = get_tokenizer("cl100k_base")
+    source = "\n".join(f"- policy item {index}" for index in range(1, 30))
+    element = _element(source, element_type="list")
+    kwargs = {
+        "elements": [element],
+        "tokenizer": tokenizer,
+        "document_title": "List fixture",
+        "child_target_tokens": 18,
+        "child_max_tokens": 24,
+        "child_overlap_tokens": 0,
+    }
+
+    first = build_structure_aware_children(**kwargs)
+    second = build_structure_aware_children(**kwargs)
+
+    assert [(child.child_index, child.source_text) for child in first] == [
+        (child.child_index, child.source_text) for child in second
+    ]
+    assert " ".join(" ".join(child.source_text.split()) for child in first) == " ".join(
+        source.split()
+    )
+    assert all(child.section_path == ("Travel",) for child in first)
