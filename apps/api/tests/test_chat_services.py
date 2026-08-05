@@ -5,6 +5,7 @@ import pytest
 
 from app.core.config import get_settings
 from app.services import chat_generation, retrieval
+from app.services.retrieval_candidates import RetrievalCandidate
 
 
 def _source(
@@ -38,8 +39,8 @@ class _Session:
 
     async def execute(self, statement):
         self.statements.append(statement)
-        rows = self.active_rows if len(self.statements) == 1 else self.chunk_rows
-        return _Result(rows)
+        _ = statement
+        return _Result(self.chunk_rows)
 
 
 class _CollectionSession(_Session):
@@ -197,6 +198,145 @@ def test_candidate_identity_accepts_metadata_only_pinecone_matches() -> None:
         )
         is not None
     )
+
+
+@pytest.mark.asyncio
+async def test_hybrid_retrieval_accepts_lexical_only_candidate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    user_id = uuid.uuid4()
+    document_id = uuid.uuid4()
+    chunk_id = uuid.uuid4()
+    session = _Session(
+        active_rows=[],
+        chunk_rows=[
+            (chunk_id, document_id, 2, "TRV-104 requires receipts", "policy.txt", {})
+        ],
+    )
+
+    async def _embed_query(**_kwargs):
+        return [0.1]
+
+    async def _lexical(**_kwargs):
+        return [
+            RetrievalCandidate(
+                chunk_id=chunk_id,
+                document_id=document_id,
+                generation=2,
+                channel="lexical",
+                rank=1,
+                score=0.8,
+            )
+        ]
+
+    monkeypatch.setattr(retrieval.embeddings, "embed_query", _embed_query)
+    monkeypatch.setattr(retrieval, "retrieve_lexical_candidates", _lexical)
+    sources = await retrieval.retrieve_sources(
+        session,  # type: ignore[arg-type]
+        settings=get_settings().model_copy(update={"retrieval_mode": "hybrid"}),
+        pinecone_client=_Pinecone([]),  # type: ignore[arg-type]
+        query="TRV-104",
+        user_id=user_id,
+    )
+
+    assert [source.chunk_id for source in sources] == [str(chunk_id)]
+
+
+@pytest.mark.asyncio
+async def test_hybrid_shadow_keeps_dense_answer_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    user_id = uuid.uuid4()
+    document_id = uuid.uuid4()
+    dense_chunk_id = uuid.uuid4()
+    lexical_chunk_id = uuid.uuid4()
+    session = _Session(
+        active_rows=[],
+        chunk_rows=[
+            (dense_chunk_id, document_id, 1, "dense source", "policy.txt", {}),
+            (lexical_chunk_id, document_id, 1, "lexical source", "policy.txt", {}),
+        ],
+    )
+    matches = [
+        {
+            "score": 0.9,
+            "metadata": {
+                "document_id": str(document_id),
+                "generation": 1,
+                "chunk_id": str(dense_chunk_id),
+            },
+        }
+    ]
+
+    async def _embed_query(**_kwargs):
+        return [0.1]
+
+    async def _lexical(**_kwargs):
+        return [
+            RetrievalCandidate(
+                chunk_id=lexical_chunk_id,
+                document_id=document_id,
+                generation=1,
+                channel="lexical",
+                rank=1,
+                score=1.0,
+            )
+        ]
+
+    monkeypatch.setattr(retrieval.embeddings, "embed_query", _embed_query)
+    monkeypatch.setattr(retrieval, "retrieve_lexical_candidates", _lexical)
+    sources = await retrieval.retrieve_sources(
+        session,  # type: ignore[arg-type]
+        settings=get_settings().model_copy(update={"retrieval_mode": "hybrid_shadow"}),
+        pinecone_client=_Pinecone(matches),  # type: ignore[arg-type]
+        query="policy",
+        user_id=user_id,
+    )
+
+    assert [source.chunk_id for source in sources] == [str(dense_chunk_id)]
+
+
+@pytest.mark.asyncio
+async def test_expansion_promotes_lifecycle_valid_child_to_parent() -> None:
+    document_id, chunk_id, parent_id = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    source = retrieval.RetrievedSource(
+        document_id=document_id,
+        generation=2,
+        chunk_id=str(chunk_id),
+        filename="policy.txt",
+        chunk_text="child clause",
+        score=0.8,
+        page_number=2,
+        section_heading="Travel",
+    )
+    session = _Session(
+        active_rows=[],
+        chunk_rows=[
+            (
+                chunk_id,
+                document_id,
+                2,
+                "child clause",
+                "policy.txt",
+                {},
+                parent_id,
+                None,
+                None,
+                "complete parent policy context",
+            )
+        ],
+    )
+
+    expanded = await retrieval._expand_lifecycle_valid_sources(  # noqa: SLF001
+        session,  # type: ignore[arg-type]
+        user_id=uuid.uuid4(),
+        sources=[source],
+        collection_ids=[],
+    )
+
+    assert expanded[0].chunk_text == "complete parent policy context"
+    assert expanded[0].parent_id == str(parent_id)
+    assert expanded[0].supporting_chunk_ids == (str(chunk_id),)
 
 
 def test_grounded_prompt_delimits_untrusted_sources() -> None:

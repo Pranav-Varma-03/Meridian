@@ -19,10 +19,17 @@ from app.models.entities import (
     DocumentChunk,
     DocumentIngestionGeneration,
     DocumentLifecycleStatus,
+    DocumentParentWindow,
     GenerationStatus,
 )
 from app.services import embeddings
-from app.services.retrieval_lifecycle import filter_active_retrieval_candidates
+from app.services.lexical_retrieval import retrieve_lexical_candidates
+from app.services.reranking import Reranker, apply_reranker
+from app.services.retrieval_candidates import (
+    FusedCandidate,
+    RetrievalCandidate,
+    fuse_ranked_candidates,
+)
 
 
 class CollectionAccessError(Exception):
@@ -43,6 +50,8 @@ class RetrievedSource:
     score: float
     page_number: int | None
     section_heading: str | None
+    parent_id: str | None = None
+    supporting_chunk_ids: tuple[str, ...] = ()
 
     def citation(self) -> dict[str, Any]:
         excerpt = self.chunk_text[:1000]
@@ -105,11 +114,31 @@ def _page_number(metadata: Mapping[str, Any]) -> int | None:
         return None
 
 
+def _dense_candidates(matches: list[Any]) -> list[RetrievalCandidate]:
+    candidates: list[RetrievalCandidate] = []
+    for rank, match in enumerate(matches, start=1):
+        identity = _candidate_identity(match)
+        if identity is None:
+            continue
+        document_id, generation, chunk_id = identity
+        candidates.append(
+            RetrievalCandidate(
+                chunk_id=chunk_id,
+                document_id=document_id,
+                generation=generation,
+                channel="dense",
+                rank=rank,
+                score=_score(match),
+            )
+        )
+    return candidates
+
+
 async def _hydrate_active_chunks(
     session: AsyncSession,
     *,
     user_id: uuid.UUID,
-    candidates: list[Any],
+    candidates: list[RetrievalCandidate] | list[FusedCandidate],
 ) -> list[RetrievedSource]:
     """Load candidate text from Postgres, never from Pinecone metadata.
 
@@ -118,17 +147,10 @@ async def _hydrate_active_chunks(
     text and provides a second document/generation lifecycle fence before content is
     included in a model prompt.
     """
-    parsed = [
-        (candidate, identity)
-        for candidate in candidates
-        if (identity := _candidate_identity(candidate)) is not None
-    ]
-    if not parsed:
+    if not candidates:
         return []
 
-    chunk_ids = [
-        chunk_id for _candidate, (_document_id, _generation, chunk_id) in parsed
-    ]
+    chunk_ids = [candidate.chunk_id for candidate in candidates]
     result = await session.execute(
         select(
             DocumentChunk.id,
@@ -157,7 +179,10 @@ async def _hydrate_active_chunks(
     }
 
     sources: list[RetrievedSource] = []
-    for candidate, (document_id, generation, chunk_id) in parsed:
+    for candidate in candidates:
+        document_id = candidate.document_id
+        generation = candidate.generation
+        chunk_id = candidate.chunk_id
         chunk = chunks.get(chunk_id)
         if chunk is None:
             continue
@@ -184,7 +209,7 @@ async def _hydrate_active_chunks(
                 chunk_id=str(chunk_id),
                 filename=filename,
                 chunk_text=chunk_text.strip(),
-                score=_score(candidate),
+                score=candidate.score,
                 page_number=_page_number(chunk_metadata),
                 section_heading=str(heading) if heading else None,
             )
@@ -206,6 +231,136 @@ async def _validate_collection_ids(
         raise CollectionAccessError("Collection not found")
 
 
+async def _expand_lifecycle_valid_sources(
+    session: AsyncSession,
+    *,
+    user_id: uuid.UUID,
+    sources: list[RetrievedSource],
+    collection_ids: list[uuid.UUID],
+) -> list[RetrievedSource]:
+    """Promote children to exact parents or bounded same-generation neighbors."""
+    if not sources:
+        return []
+    source_ids = [uuid.UUID(source.chunk_id) for source in sources]
+    statement = (
+        select(
+            DocumentChunk.id,
+            DocumentChunk.document_id,
+            DocumentIngestionGeneration.generation_number,
+            DocumentChunk.chunk_text,
+            Document.filename,
+            DocumentChunk.metadata_json,
+            DocumentChunk.parent_id,
+            DocumentChunk.previous_chunk_id,
+            DocumentChunk.next_chunk_id,
+            DocumentParentWindow.source_text,
+        )
+        .join(Document, Document.id == DocumentChunk.document_id)
+        .join(
+            DocumentIngestionGeneration,
+            DocumentIngestionGeneration.id == DocumentChunk.generation_id,
+        )
+        .outerjoin(
+            DocumentParentWindow, DocumentParentWindow.id == DocumentChunk.parent_id
+        )
+        .where(
+            DocumentChunk.id.in_(source_ids),
+            Document.user_id == user_id,
+            Document.lifecycle_status == DocumentLifecycleStatus.active,
+            Document.active_generation_id == DocumentIngestionGeneration.id,
+            DocumentIngestionGeneration.status == GenerationStatus.active,
+        )
+    )
+    if collection_ids:
+        statement = statement.where(Document.collection_id.in_(collection_ids))
+    result = await session.execute(statement)
+    rows = {row[0]: row for row in result.all()}
+    neighbor_ids = {
+        neighbor_id
+        for row in rows.values()
+        if row[6] is None
+        for neighbor_id in (row[7], row[8])
+        if neighbor_id is not None
+    }
+    neighbors: dict[uuid.UUID, str] = {}
+    if neighbor_ids:
+        neighbor_statement = (
+            select(DocumentChunk.id, DocumentChunk.chunk_text)
+            .join(Document, Document.id == DocumentChunk.document_id)
+            .join(
+                DocumentIngestionGeneration,
+                DocumentIngestionGeneration.id == DocumentChunk.generation_id,
+            )
+            .where(
+                DocumentChunk.id.in_(neighbor_ids),
+                Document.user_id == user_id,
+                Document.lifecycle_status == DocumentLifecycleStatus.active,
+                Document.active_generation_id == DocumentIngestionGeneration.id,
+                DocumentIngestionGeneration.status == GenerationStatus.active,
+            )
+        )
+        if collection_ids:
+            neighbor_statement = neighbor_statement.where(
+                Document.collection_id.in_(collection_ids)
+            )
+        neighbor_result = await session.execute(neighbor_statement)
+        neighbors = {
+            neighbor_id: text
+            for neighbor_id, text in neighbor_result.all()
+            if isinstance(text, str) and text.strip()
+        }
+    by_source_id = {uuid.UUID(source.chunk_id): source for source in sources}
+    expanded: list[RetrievedSource] = []
+    seen_units: set[tuple[uuid.UUID, uuid.UUID]] = set()
+    for chunk_id, row in rows.items():
+        source = by_source_id[chunk_id]
+        parent_id = row[6]
+        parent_text = row[9]
+        unit_id = parent_id or chunk_id
+        key = (row[1], unit_id)
+        if key in seen_units:
+            continue
+        seen_units.add(key)
+        if parent_id is not None and parent_text:
+            expanded.append(
+                RetrievedSource(
+                    document_id=source.document_id,
+                    generation=source.generation,
+                    chunk_id=source.chunk_id,
+                    filename=source.filename,
+                    chunk_text=parent_text,
+                    score=source.score,
+                    page_number=source.page_number,
+                    section_heading=source.section_heading,
+                    parent_id=str(parent_id),
+                    supporting_chunk_ids=(source.chunk_id,),
+                )
+            )
+        else:
+            previous_text = neighbors.get(row[7])
+            next_text = neighbors.get(row[8])
+            expanded.append(
+                RetrievedSource(
+                    document_id=source.document_id,
+                    generation=source.generation,
+                    chunk_id=source.chunk_id,
+                    filename=source.filename,
+                    chunk_text="\n\n".join(
+                        [
+                            text
+                            for text in (previous_text, source.chunk_text, next_text)
+                            if text
+                        ]
+                    ),
+                    score=source.score,
+                    page_number=source.page_number,
+                    section_heading=source.section_heading,
+                    supporting_chunk_ids=(source.chunk_id,),
+                )
+            )
+    return expanded
+
+
 async def retrieve_sources(
     session: AsyncSession,
     *,
@@ -215,6 +370,7 @@ async def retrieve_sources(
     user_id: uuid.UUID,
     collection_ids: list[uuid.UUID] | None = None,
     openai_client: AsyncOpenAI | None = None,
+    reranker: Reranker | None = None,
 ) -> list[RetrievedSource]:
     """Query one owner namespace then prove each returned match is live in Postgres."""
     selected_collections = collection_ids or []
@@ -248,21 +404,80 @@ async def retrieve_sources(
     except Exception as exc:
         raise RetrievalUnavailableError("Retrieval is temporarily unavailable") from exc
 
-    candidates = getattr(response, "matches", None)
-    if candidates is None and isinstance(response, Mapping):
-        candidates = response.get("matches", [])
-    active = await filter_active_retrieval_candidates(
-        session, user_id=user_id, candidates=list(candidates or [])
+    matches = getattr(response, "matches", None)
+    if matches is None and isinstance(response, Mapping):
+        matches = response.get("matches", [])
+    dense_candidates = _dense_candidates(list(matches or []))
+    selected_candidates: list[RetrievalCandidate] | list[FusedCandidate] = (
+        dense_candidates
     )
+
+    if settings.retrieval_mode != "dense":
+        try:
+            lexical_candidates = await retrieve_lexical_candidates(
+                session=session,
+                user_id=user_id,
+                query=query,
+                collection_ids=selected_collections,
+                limit=settings.chat_retrieval_top_k * settings.chat_retrieval_overfetch,
+            )
+        except Exception as exc:
+            if (
+                settings.retrieval_mode == "hybrid"
+                and settings.lexical_degradation_mode != "dense_only"
+            ):
+                raise RetrievalUnavailableError(
+                    "Lexical retrieval is temporarily unavailable"
+                ) from exc
+            lexical_candidates = []
+        fused = fuse_ranked_candidates(
+            [*dense_candidates, *lexical_candidates],
+            rrf_k=settings.retrieval_rrf_k,
+            dense_weight=settings.retrieval_dense_weight,
+            lexical_weight=settings.retrieval_lexical_weight,
+        )
+        if settings.retrieval_mode == "hybrid":
+            selected_candidates = fused
+
     normalized = await _hydrate_active_chunks(
         session,
         user_id=user_id,
-        candidates=active,
+        candidates=selected_candidates,
     )
-    qualifying = [
-        source
-        for source in normalized
-        if source.score >= settings.chat_retrieval_score_threshold
-    ]
+    if settings.retrieval_expansion_enabled:
+        normalized = await _expand_lifecycle_valid_sources(
+            session,
+            user_id=user_id,
+            sources=normalized,
+            collection_ids=selected_collections,
+        )
+    qualifying = (
+        normalized
+        if settings.retrieval_mode == "hybrid"
+        else [
+            source
+            for source in normalized
+            if source.score >= settings.chat_retrieval_score_threshold
+        ]
+    )
     qualifying.sort(key=lambda source: source.score, reverse=True)
-    return qualifying[: settings.chat_retrieval_max_sources]
+    qualifying = qualifying[: settings.chat_retrieval_max_sources]
+    if reranker is not None and (
+        settings.reranking_enabled or settings.reranking_shadow_enabled
+    ):
+        try:
+            reranked = await apply_reranker(
+                reranker=reranker, query=query, sources=qualifying
+            )
+        except Exception as exc:
+            if (
+                settings.reranking_enabled
+                and settings.lexical_degradation_mode == "fail"
+            ):
+                raise RetrievalUnavailableError(
+                    "Reranking is temporarily unavailable"
+                ) from exc
+        else:
+            if settings.reranking_enabled:
+                qualifying = reranked
+    return qualifying
