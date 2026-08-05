@@ -52,10 +52,13 @@ class RetrievedSource:
     section_heading: str | None
     parent_id: str | None = None
     supporting_chunk_ids: tuple[str, ...] = ()
+    section_path: tuple[str, ...] = ()
+    page_start: int | None = None
+    page_end: int | None = None
 
     def citation(self) -> dict[str, Any]:
         excerpt = self.chunk_text[:1000]
-        return {
+        citation = {
             "document_id": str(self.document_id),
             "generation": self.generation,
             "chunk_id": self.chunk_id,
@@ -68,6 +71,17 @@ class RetrievedSource:
             ).hexdigest(),
             "score": self.score,
         }
+        if self.parent_id:
+            citation["parent_id"] = self.parent_id
+        if self.supporting_chunk_ids:
+            citation["supporting_chunk_ids"] = list(self.supporting_chunk_ids)
+        if self.section_path:
+            citation["section_path"] = list(self.section_path)
+        if self.page_start is not None:
+            citation["page_start"] = self.page_start
+        if self.page_end is not None:
+            citation["page_end"] = self.page_end
+        return citation
 
 
 def _metadata(candidate: Any) -> Mapping[str, Any] | None:
