@@ -29,6 +29,7 @@ class _Session:
         self.generation = generation
         self.vector_ids = vector_ids
         self.commits = 0
+        self.executed = []
 
     async def scalar(self, _statement):
         if not hasattr(self, "_document_returned"):
@@ -41,6 +42,9 @@ class _Session:
 
     async def commit(self):
         self.commits += 1
+
+    async def execute(self, statement):
+        self.executed.append(statement)
 
 
 @pytest.mark.asyncio
@@ -157,3 +161,61 @@ async def test_document_purge_reconciles_all_legacy_document_vectors(
     assert document.lifecycle_status == DocumentLifecycleStatus.deleted
     assert job.status == PurgeJobStatus.complete
     assert not raw_file.exists()
+
+
+@pytest.mark.asyncio
+async def test_structured_generation_purge_removes_only_its_relational_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    document_id = uuid.uuid4()
+    generation_id = uuid.uuid4()
+    document = types.SimpleNamespace(
+        id=document_id,
+        user_id=uuid.uuid4(),
+        lifecycle_status=DocumentLifecycleStatus.active,
+        metadata_json={},
+    )
+    generation = types.SimpleNamespace(
+        id=generation_id,
+        generation_number=2,
+        status=GenerationStatus.failed,
+        configuration_json={"chunker": {"strategy": "structure_aware_parent_child_v1"}},
+    )
+    job = types.SimpleNamespace(
+        id=uuid.uuid4(),
+        document_id=document_id,
+        generation_id=generation_id,
+        attempts=1,
+        status=PurgeJobStatus.running,
+        started_at=datetime.now(UTC),
+        next_attempt_at=None,
+        completed_at=None,
+        last_error=None,
+    )
+    session = _Session(document=document, generation=generation, vector_ids=["v2"])
+
+    async def _delete_exact(*_args, **_kwargs):
+        return None
+
+    async def _delete_filter(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(purge_worker.embeddings, "delete_embeddings", _delete_exact)
+    monkeypatch.setattr(
+        purge_worker.embeddings,
+        "delete_embeddings_by_metadata_filter",
+        _delete_filter,
+    )
+
+    await purge_worker.process_purge_job(
+        session,  # type: ignore[arg-type]
+        job=job,
+        pinecone_client=object(),
+        pinecone_index_name="index",
+        batch_size=100,
+        timeout_seconds=1,
+        max_attempts=1,
+    )
+
+    assert len(session.executed) == 2
+    assert generation.status == GenerationStatus.purged

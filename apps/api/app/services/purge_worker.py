@@ -4,20 +4,23 @@ import logging
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from sqlalchemy import or_, select, update
+from sqlalchemy import delete, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.observability import classify_provider_failure
 from app.models.entities import (
     Document,
+    DocumentChunk,
     DocumentIngestionGeneration,
     DocumentLifecycleStatus,
+    DocumentParentWindow,
     GenerationStatus,
     GenerationVectorManifest,
     PurgeJob,
     PurgeJobStatus,
 )
 from app.services import embeddings
+from app.services.structured_ingestion import uses_structured_generation
 
 logger = logging.getLogger(__name__)
 
@@ -193,6 +196,22 @@ async def process_purge_job(
             )
         )
         if generation is not None:
+            if uses_structured_generation(
+                getattr(generation, "configuration_json", None)
+            ):
+                # Remove only the failed/superseded generation's relational state.
+                # The prior active generation has a different generation ID and is
+                # therefore unaffected by this compensation step.
+                await session.execute(
+                    delete(DocumentChunk).where(
+                        DocumentChunk.generation_id == generation.id
+                    )
+                )
+                await session.execute(
+                    delete(DocumentParentWindow).where(
+                        DocumentParentWindow.generation_id == generation.id
+                    )
+                )
             generation.status = GenerationStatus.purged
     else:
         metadata = document.metadata_json or {}

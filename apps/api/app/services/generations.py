@@ -3,13 +3,15 @@
 import uuid
 from datetime import UTC, datetime
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.entities import (
     Document,
+    DocumentChunk,
     DocumentIngestionGeneration,
     DocumentLifecycleStatus,
+    DocumentParentWindow,
     GenerationStatus,
     GenerationVectorManifest,
     IngestionJob,
@@ -18,6 +20,46 @@ from app.models.entities import (
     PurgeJob,
     PurgeJobStatus,
 )
+from app.services.structured_ingestion import uses_structured_generation
+
+
+async def ensure_generation_activation_ready(
+    session: AsyncSession,
+    *,
+    generation: DocumentIngestionGeneration,
+    vector_ids: list[str],
+) -> None:
+    """Fence structured generations until every derived retrieval record exists."""
+    if not uses_structured_generation(getattr(generation, "configuration_json", None)):
+        return
+    await session.flush()
+    parent_count = await session.scalar(
+        select(func.count(DocumentParentWindow.id)).where(
+            DocumentParentWindow.generation_id == generation.id
+        )
+    )
+    child_count = await session.scalar(
+        select(func.count(DocumentChunk.id)).where(
+            DocumentChunk.generation_id == generation.id
+        )
+    )
+    complete_child_count = await session.scalar(
+        select(func.count(DocumentChunk.id)).where(
+            DocumentChunk.generation_id == generation.id,
+            DocumentChunk.parent_id.is_not(None),
+            DocumentChunk.embedding_text.is_not(None),
+            DocumentChunk.lexical_search.is_not(None),
+            DocumentChunk.vector_id.is_not(None),
+        )
+    )
+    expected = int(child_count or 0)
+    if (
+        int(parent_count or 0) <= 0
+        or expected <= 0
+        or int(complete_child_count or 0) != expected
+        or len(set(vector_ids)) != expected
+    ):
+        raise ValueError("Structured generation is incomplete and cannot activate")
 
 
 async def activate_generation(
@@ -88,6 +130,10 @@ async def activate_generation(
             )
         await session.commit()
         return False
+
+    await ensure_generation_activation_ready(
+        session, generation=generation, vector_ids=vector_ids
+    )
 
     previous_generation_id = document.active_generation_id
     for vector_id in dict.fromkeys(vector_ids):

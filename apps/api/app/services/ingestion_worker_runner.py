@@ -12,10 +12,14 @@ from app.core.database import AsyncSessionLocal
 from app.core.observability import SecretSafeJsonFormatter, classify_provider_failure
 from app.services import (
     contextual_chunking,
+    document_parsing,
     document_processor,
     embeddings,
     generations,
     ingestion_worker,
+    structured_chunking,
+    structured_ingestion,
+    tokenization,
 )
 
 settings = get_settings()
@@ -112,43 +116,115 @@ async def default_ingestion_processor(
             "Document storage path is missing"
         )
 
-    try:
-        segments = document_processor.extract_text_segments(
-            storage_path=storage_path,
-            mime_type=claimed_job.document.mime_type,
+    generation = getattr(claimed_job, "generation", None)
+    is_structured = (
+        generation is not None
+        and structured_ingestion.uses_structured_generation(
+            getattr(generation, "configuration_json", None)
         )
-    except (OSError, ValueError) as exc:
+    )
+    try:
+        if is_structured:
+            configuration = generation.configuration_json
+            parser = configuration["parser"]
+            chunker = configuration["chunker"]
+            elements = document_parsing.parse_document(
+                storage_path=storage_path,
+                mime_type=claimed_job.document.mime_type,
+                provider=parser["provider"],
+                allow_compatibility_fallback=True,
+            )
+            if not elements:
+                raise ingestion_worker.NonRetryableIngestionError(
+                    "No extractable text found in document"
+                )
+            tokenizer = tokenization.get_tokenizer(configuration["tokenizer"]["name"])
+            children = structured_chunking.build_structure_aware_children(
+                elements=elements,
+                tokenizer=tokenizer,
+                document_title=claimed_job.document.filename,
+                child_target_tokens=chunker["child_target_tokens"],
+                child_max_tokens=chunker["child_max_tokens"],
+                child_overlap_tokens=chunker["child_overlap_tokens"],
+            )
+            children, parents = structured_chunking.build_parent_windows(
+                children=children,
+                tokenizer=tokenizer,
+                parent_target_tokens=chunker["parent_target_tokens"],
+                parent_max_tokens=chunker["parent_max_tokens"],
+            )
+            if not children or not parents:
+                raise ingestion_worker.NonRetryableIngestionError(
+                    "Structured chunk generation produced no output"
+                )
+            persisted_chunks = (
+                await structured_ingestion.persist_parent_child_generation(
+                    session,
+                    document_id=claimed_job.document.id,
+                    generation_id=generation.id,
+                    source_file=claimed_job.document.filename,
+                    strategy_version=chunker["strategy"],
+                    children=children,
+                    parents=parents,
+                )
+            )
+            document_text = "\n\n".join(element.text for element in elements)
+        else:
+            segments = document_processor.extract_text_segments(
+                storage_path=storage_path,
+                mime_type=claimed_job.document.mime_type,
+            )
+            if not segments:
+                raise ingestion_worker.NonRetryableIngestionError(
+                    "No extractable text found in document"
+                )
+            chunks = document_processor.build_chunks(
+                segments=segments,
+                source_file=claimed_job.document.filename,
+            )
+            if not chunks:
+                raise ingestion_worker.NonRetryableIngestionError(
+                    "Chunk generation produced no output"
+                )
+            document_text = "\n\n".join(
+                segment.text for segment in segments if segment.text.strip()
+            )
+            if generation is None:
+                await document_processor.replace_document_chunks(
+                    session, document_id=claimed_job.document.id, chunks=chunks
+                )
+                persisted_chunks = await document_processor.list_document_chunks(
+                    session, document_id=claimed_job.document.id
+                )
+            else:
+                await document_processor.create_generation_chunks(
+                    session,
+                    document_id=claimed_job.document.id,
+                    generation_id=generation.id,
+                    chunks=chunks,
+                )
+                persisted_chunks = await document_processor.list_generation_chunks(
+                    session, generation_id=generation.id
+                )
+    except (
+        document_parsing.DocumentParseError,
+        tokenization.TokenizerConfigurationError,
+        KeyError,
+        OSError,
+        ValueError,
+    ) as exc:
         raise ingestion_worker.NonRetryableIngestionError(
-            f"Unable to parse document content: {exc}"
+            "Unable to parse and structure document content"
         ) from exc
 
-    if not segments:
-        raise ingestion_worker.NonRetryableIngestionError(
-            "No extractable text found in document"
-        )
-
-    chunks = document_processor.build_chunks(
-        segments=segments,
-        source_file=claimed_job.document.filename,
-    )
-    if not chunks:
-        raise ingestion_worker.NonRetryableIngestionError(
-            "Chunk generation produced no output"
-        )
-
-    document_text = "\n\n".join(
-        segment.text for segment in segments if segment.text.strip()
-    )
     contextualized_lookup: dict[int, str] = {}
-
     if settings.contextual_embedding_enabled and document_text:
         if settings.contextual_chunking_provider == "openai":
             if openai_client is None or not settings.contextual_chunking_model:
                 raise ingestion_worker.NonRetryableIngestionError(
                     "OpenAI contextual chunking is enabled but not configured correctly"
                 )
-
-            for chunk in chunks:
+            for chunk in persisted_chunks:
                 contextualized_lookup[
                     chunk.chunk_index
                 ] = await contextual_chunking.situate_chunk_with_openai(
@@ -157,6 +233,14 @@ async def default_ingestion_processor(
                     chunk_text=chunk.chunk_text,
                     model=settings.contextual_chunking_model,
                 )
+        elif is_structured:
+            contextualized_lookup = {
+                chunk.chunk_index: document_processor._situate_chunk_with_document_context(
+                    document_text=document_text,
+                    chunk_text=chunk.chunk_text,
+                )
+                for chunk in persisted_chunks
+            }
         else:
             contextualized_chunks = document_processor.build_contextualized_chunks(
                 segments=segments,
@@ -168,30 +252,10 @@ async def default_ingestion_processor(
                 if chunk.contextualized_text
             }
 
-    generation = getattr(claimed_job, "generation", None)
-    if generation is None:
-        # Compatibility path for legacy jobs created before migration 0003.
-        await document_processor.replace_document_chunks(
-            session, document_id=claimed_job.document.id, chunks=chunks
-        )
-        persisted_chunks = await document_processor.list_document_chunks(
-            session, document_id=claimed_job.document.id
-        )
-    else:
-        await document_processor.create_generation_chunks(
-            session,
-            document_id=claimed_job.document.id,
-            generation_id=generation.id,
-            chunks=chunks,
-        )
-        persisted_chunks = await document_processor.list_generation_chunks(
-            session, generation_id=generation.id
-        )
-
-    # Keep retrieval and reconciliation metadata explicit and scalar for Pinecone.
+    # Pinecone metadata is a bounded locator/filter envelope. Source, embedding,
+    # lexical, and derived context text remain authoritative only in Postgres.
     for persisted_chunk in persisted_chunks:
         persisted_chunk.metadata_json = {
-            **(getattr(persisted_chunk, "metadata_json", None) or {}),
             "document_id": str(claimed_job.document.id),
             "generation": generation.generation_number if generation else 0,
             "user_id": str(claimed_job.document.user_id),
@@ -200,6 +264,12 @@ async def default_ingestion_processor(
                 if getattr(claimed_job.document, "collection_id", None)
                 else ""
             ),
+            "chunk_index": getattr(persisted_chunk, "chunk_index", 0),
+            "parent_id": str(getattr(persisted_chunk, "parent_id", None) or ""),
+            "page_start": getattr(persisted_chunk, "page_start", None) or "",
+            "page_end": getattr(persisted_chunk, "page_end", None) or "",
+            "source_start": getattr(persisted_chunk, "source_start", None) or "",
+            "source_end": getattr(persisted_chunk, "source_end", None) or "",
         }
 
     chunks_for_embedding = []
@@ -264,7 +334,7 @@ async def default_ingestion_processor(
             "job_id": str(claimed_job.job.id),
             "document_id": str(claimed_job.document.id),
             "attempts": claimed_job.job.attempts,
-            "chunk_count": len(chunks),
+            "chunk_count": len(persisted_chunks),
         },
     )
 

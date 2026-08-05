@@ -4,6 +4,7 @@ import uuid
 import pytest
 
 from app.services import ingestion_worker_runner
+from app.services.document_parsing import DocumentElement, DocumentParseError
 
 
 @pytest.fixture(autouse=True)
@@ -152,6 +153,154 @@ async def test_default_ingestion_processor_sets_vector_ids(
     await ingestion_worker_runner.default_ingestion_processor(object(), claimed)
 
     assert chunk_row.vector_id == f"chunk:{chunk_id}"
+
+
+@pytest.mark.asyncio
+async def test_default_ingestion_processor_uses_structured_generation_branch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    document_id = uuid.uuid4()
+    user_id = uuid.uuid4()
+    generation_id = uuid.uuid4()
+    chunk_id = uuid.uuid4()
+    configuration = {
+        "parser": {"provider": "compatibility"},
+        "tokenizer": {"name": "cl100k_base"},
+        "chunker": {
+            "strategy": "structure_aware_parent_child_v1",
+            "child_target_tokens": 384,
+            "child_max_tokens": 512,
+            "child_overlap_tokens": 48,
+            "parent_target_tokens": 900,
+            "parent_max_tokens": 1200,
+        },
+    }
+    claimed = types.SimpleNamespace(
+        job=types.SimpleNamespace(id=uuid.uuid4(), attempts=1),
+        document=types.SimpleNamespace(
+            id=document_id,
+            user_id=user_id,
+            filename="policy.txt",
+            mime_type="text/plain",
+            metadata_json={"storage_path": "/tmp/policy.txt"},
+            collection_id=None,
+        ),
+        generation=types.SimpleNamespace(
+            id=generation_id,
+            generation_number=2,
+            configuration_json=configuration,
+        ),
+    )
+    row = types.SimpleNamespace(
+        id=chunk_id,
+        chunk_index=0,
+        chunk_text="exact policy evidence",
+        embedding_text="Document: policy.txt\n\nexact policy evidence",
+        parent_id=uuid.uuid4(),
+        page_start=1,
+        page_end=1,
+        source_start=0,
+        source_end=21,
+        vector_id=None,
+        metadata_json={},
+    )
+    captured = {}
+
+    monkeypatch.setattr(
+        ingestion_worker_runner.document_parsing,
+        "parse_document",
+        lambda **_kwargs: [
+            DocumentElement(
+                element_type="paragraph",
+                text="exact policy evidence",
+                section_path=(),
+                page_start=1,
+                page_end=1,
+                source_start=0,
+                source_end=21,
+            )
+        ],
+    )
+
+    async def _persist(_session, **kwargs):
+        captured["persist"] = kwargs
+        return [row]
+
+    async def _embed(chunks, *, generation_number=None):
+        captured["embedded_text"] = chunks[0].embedding_text
+        captured["generation_number"] = generation_number
+        return [types.SimpleNamespace(chunk_id=chunk_id, vector_id="vector-1")]
+
+    async def _upsert(*, namespace, embedded_chunks):
+        captured["namespace"] = namespace
+        assert embedded_chunks[0].vector_id == "vector-1"
+
+    async def _activate(_session, **kwargs):
+        captured["activation"] = kwargs
+        return True
+
+    monkeypatch.setattr(
+        ingestion_worker_runner.structured_ingestion,
+        "persist_parent_child_generation",
+        _persist,
+    )
+    monkeypatch.setattr(ingestion_worker_runner, "_embed_chunks_with_retry", _embed)
+    monkeypatch.setattr(
+        ingestion_worker_runner, "_upsert_embeddings_with_retry", _upsert
+    )
+    monkeypatch.setattr(
+        ingestion_worker_runner.generations, "activate_generation", _activate
+    )
+    monkeypatch.setattr(
+        ingestion_worker_runner.settings, "contextual_embedding_enabled", False
+    )
+
+    await ingestion_worker_runner.default_ingestion_processor(object(), claimed)
+
+    assert captured["persist"]["generation_id"] == generation_id
+    assert captured["embedded_text"].startswith("Document: policy.txt")
+    assert captured["generation_number"] == 2
+    assert captured["activation"]["vector_ids"] == ["vector-1"]
+    assert row.chunk_text == "exact policy evidence"
+    assert "chunk_text" not in row.metadata_json
+
+
+@pytest.mark.asyncio
+async def test_structured_ingestion_parser_failure_is_non_retryable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    claimed = types.SimpleNamespace(
+        job=types.SimpleNamespace(id=uuid.uuid4(), attempts=1),
+        document=types.SimpleNamespace(
+            id=uuid.uuid4(),
+            user_id=uuid.uuid4(),
+            filename="scan.pdf",
+            mime_type="application/pdf",
+            metadata_json={"storage_path": "/tmp/scan.pdf"},
+        ),
+        generation=types.SimpleNamespace(
+            id=uuid.uuid4(),
+            generation_number=1,
+            configuration_json={
+                "parser": {"provider": "unstructured"},
+                "tokenizer": {"name": "cl100k_base"},
+                "chunker": {"strategy": "structure_aware_parent_child_v1"},
+            },
+        ),
+    )
+
+    def _parse_failure(**_kwargs):
+        raise DocumentParseError("OCR is unsupported")
+
+    monkeypatch.setattr(
+        ingestion_worker_runner.document_parsing, "parse_document", _parse_failure
+    )
+
+    with pytest.raises(
+        ingestion_worker_runner.ingestion_worker.NonRetryableIngestionError,
+        match="Unable to parse",
+    ):
+        await ingestion_worker_runner.default_ingestion_processor(object(), claimed)
 
 
 @pytest.mark.asyncio

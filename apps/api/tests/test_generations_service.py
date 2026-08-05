@@ -110,3 +110,37 @@ async def test_activate_generation_fences_deleting_document_and_queues_cleanup()
     assert activated is False
     assert generation.status == GenerationStatus.failed
     assert any(item.__class__.__name__ == "PurgeJob" for item in session.added)
+
+
+@pytest.mark.asyncio
+async def test_structured_generation_activation_requires_complete_rows() -> None:
+    generation = types.SimpleNamespace(
+        id=uuid.uuid4(),
+        configuration_json={"chunker": {"strategy": "structure_aware_parent_child_v1"}},
+    )
+
+    class Session:
+        def __init__(self, values):
+            self.values = iter(values)
+            self.flushed = False
+
+        async def flush(self):
+            self.flushed = True
+
+        async def scalar(self, _statement):
+            return next(self.values)
+
+    session = Session([1, 2, 2])
+    await generations.ensure_generation_activation_ready(
+        session,  # type: ignore[arg-type]
+        generation=generation,
+        vector_ids=["a", "b"],
+    )
+    assert session.flushed is True
+
+    with pytest.raises(ValueError, match="incomplete"):
+        await generations.ensure_generation_activation_ready(
+            Session([1, 2, 1]),  # type: ignore[arg-type]
+            generation=generation,
+            vector_ids=["a", "b"],
+        )
