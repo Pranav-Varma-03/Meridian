@@ -1,0 +1,18 @@
+# Template only. Apply through Grafana provisioning or Terraform with a secret-backed
+# webhook URL; replace the destination and escalation policy before production use.
+apiVersion: 1
+contactPoints:
+  - orgId: 1
+    name: meridian-platform
+    receivers:
+      - uid: meridian-platform-webhook
+        type: webhook
+        settings:
+          url: ${MERIDIAN_ALERT_WEBHOOK_URL}
+policies:
+  - orgId: 1
+    receiver: meridian-platform
+    group_by: [service, severity, environment]
+    group_wait: 30s
+    group_interval: 5m
+    repeat_interval: 4h

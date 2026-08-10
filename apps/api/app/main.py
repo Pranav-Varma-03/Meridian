@@ -8,12 +8,19 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from opentelemetry import trace
 from pinecone import Pinecone
 from sqlalchemy import text
 
 from app.core.config import get_settings
 from app.core.database import AsyncSessionLocal, close_db, init_db
-from app.core.observability import SecretSafeJsonFormatter, lifecycle_event
+from app.core.observability import (
+    DependencySpan,
+    SecretSafeJsonFormatter,
+    initialize_observability,
+    lifecycle_event,
+    record_http_observation,
+)
 from app.routers import (
     auth_diagnostics,
     chat,
@@ -34,6 +41,8 @@ logging.basicConfig(
     force=True,
 )
 logger = logging.getLogger(__name__)
+initialize_observability(settings)
+tracer = trace.get_tracer("meridian.api")
 
 
 def error_response(
@@ -65,13 +74,16 @@ async def lifespan(app: FastAPI):
     await init_db()
 
     app.state.redis = redis.from_url(settings.redis_url, decode_responses=True)
-    await app.state.redis.ping()
+    with DependencySpan("redis", "startup_ping"):
+        await app.state.redis.ping()
 
-    app.state.pinecone = Pinecone(api_key=settings.pinecone_api_key)
+    with DependencySpan("pinecone", "client_initialize"):
+        app.state.pinecone = Pinecone(api_key=settings.pinecone_api_key)
     app.state.db_session_factory = AsyncSessionLocal
 
     async with AsyncSessionLocal() as session:
-        await session.execute(text("SELECT 1"))
+        with DependencySpan("postgres", "startup_ping"):
+            await session.execute(text("SELECT 1"))
 
     lifecycle_event(logger, "api_clients_initialized")
     yield
@@ -96,22 +108,35 @@ async def request_context_middleware(request: Request, call_next):
     request_id = request.headers.get("x-request-id", str(uuid.uuid4()))
     request.state.request_id = request_id
     start = time.perf_counter()
-
-    response = await call_next(request)
-
-    duration_ms = round((time.perf_counter() - start) * 1000, 2)
-    response.headers["x-request-id"] = request_id
-    logger.info(
-        "request_completed",
-        extra={
-            "request_id": request_id,
-            "method": request.method,
-            "path": request.url.path,
-            "status_code": response.status_code,
-            "duration_ms": duration_ms,
-        },
-    )
-    return response
+    with tracer.start_as_current_span("http.request") as span:
+        response = await call_next(request)
+        duration_ms = round((time.perf_counter() - start) * 1000, 2)
+        route = request.scope.get("route")
+        route_template = getattr(route, "path", "unmatched")
+        span.set_attribute("http.request.method", request.method)
+        span.set_attribute("http.route", route_template)
+        span.set_attribute("http.response.status_code", response.status_code)
+        span.set_attribute("meridian.request.duration_ms", duration_ms)
+        if response.status_code >= 500:
+            span.set_status(trace.Status(trace.StatusCode.ERROR))
+        record_http_observation(
+            method=request.method,
+            route=route_template,
+            status_code=response.status_code,
+            duration_ms=duration_ms,
+        )
+        response.headers["x-request-id"] = request_id
+        logger.info(
+            "request_completed",
+            extra={
+                "request_id": request_id,
+                "method": request.method,
+                "path": route_template,
+                "status_code": response.status_code,
+                "duration_ms": duration_ms,
+            },
+        )
+        return response
 
 
 @app.exception_handler(HTTPException)

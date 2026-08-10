@@ -15,6 +15,41 @@ class Settings(BaseSettings):
     api_v1_prefix: str
     log_level: str
 
+    # Observability. The application exports OTLP only to an internal collector;
+    # Grafana Alloy owns Grafana Cloud credentials and external network egress.
+    observability_enabled: bool = False
+    otel_service_name: str = "meridian-api"
+    otel_exporter_otlp_traces_endpoint: str | None = None
+    otel_exporter_otlp_metrics_endpoint: str | None = None
+    # These aliases deliberately fail fast when direct-cloud settings leak into
+    # a Meridian workload. Grafana Alloy is the sole egress and credential
+    # boundary; applications may only authenticate to private collectors.
+    forbidden_otlp_headers: str | None = Field(
+        default=None,
+        validation_alias="OTEL_EXPORTER_OTLP_HEADERS",
+        exclude=True,
+        repr=False,
+    )
+    forbidden_otlp_endpoint: str | None = Field(
+        default=None,
+        validation_alias="OTEL_EXPORTER_OTLP_ENDPOINT",
+        exclude=True,
+        repr=False,
+    )
+    forbidden_grafana_cloud_endpoint: str | None = Field(
+        default=None,
+        validation_alias="GRAFANA_CLOUD_OTLP_ENDPOINT",
+        exclude=True,
+        repr=False,
+    )
+    forbidden_grafana_cloud_authorization: str | None = Field(
+        default=None,
+        validation_alias="GRAFANA_CLOUD_OTLP_AUTHORIZATION",
+        exclude=True,
+        repr=False,
+    )
+    otel_trace_sample_ratio: float = Field(default=0.1, ge=0, le=1)
+
     # Database
     database_url: str
 
@@ -275,6 +310,26 @@ class Settings(BaseSettings):
             raise ValueError("OPENROUTER_BASE_URL must be an HTTP(S) URL")
         return normalized
 
+    @field_validator(
+        "otel_exporter_otlp_traces_endpoint",
+        "otel_exporter_otlp_metrics_endpoint",
+    )
+    @classmethod
+    def validate_otel_endpoint(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip().rstrip("/")
+        if not normalized:
+            return None
+        if not normalized.startswith(("https://", "http://")):
+            raise ValueError("OTLP exporter endpoints must be HTTP(S) URLs")
+        if (urlsplit(normalized).hostname or "").endswith("grafana.net"):
+            raise ValueError(
+                "Meridian OTLP endpoints must target a private Grafana Alloy collector, "
+                "not Grafana Cloud"
+            )
+        return normalized
+
     @field_validator("embedding_input_type")
     @classmethod
     def validate_embedding_input_type(cls, value: str | None) -> str | None:
@@ -305,6 +360,28 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def validate_embedding_configuration(self) -> "Settings":
+        forbidden_direct_export_settings = {
+            "OTEL_EXPORTER_OTLP_HEADERS": self.forbidden_otlp_headers,
+            "OTEL_EXPORTER_OTLP_ENDPOINT": self.forbidden_otlp_endpoint,
+            "GRAFANA_CLOUD_OTLP_ENDPOINT": self.forbidden_grafana_cloud_endpoint,
+            "GRAFANA_CLOUD_OTLP_AUTHORIZATION": self.forbidden_grafana_cloud_authorization,
+        }
+        configured_forbidden_settings = [
+            key for key, value in forbidden_direct_export_settings.items() if value
+        ]
+        if configured_forbidden_settings:
+            raise ValueError(
+                "Grafana Cloud credentials and direct OTLP settings belong to Grafana "
+                "Alloy, not Meridian: " + ", ".join(configured_forbidden_settings)
+            )
+        if self.observability_enabled and (
+            not self.otel_exporter_otlp_traces_endpoint
+            or not self.otel_exporter_otlp_metrics_endpoint
+        ):
+            raise ValueError(
+                "OBSERVABILITY_ENABLED requires OTEL_EXPORTER_OTLP_TRACES_ENDPOINT "
+                "and OTEL_EXPORTER_OTLP_METRICS_ENDPOINT"
+            )
         if (
             self.embedding_provider == "pinecone"
             and self.embedding_model == "llama-text-embed-v2"

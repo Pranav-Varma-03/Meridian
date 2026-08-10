@@ -9,6 +9,7 @@ import tiktoken
 from openai import AsyncOpenAI
 
 from app.core.config import Settings
+from app.core.observability import DependencySpan
 from app.models.entities import Message
 from app.services.retrieval import RetrievedSource
 
@@ -277,20 +278,21 @@ async def stream_grounded_answer(
     if client is None:
         raise GenerationUnavailableError("Chat generation is not configured")
     try:
-        stream = await client.chat.completions.create(
-            model=settings.chat_model,
-            messages=prompt_messages,  # type: ignore[arg-type]
-            temperature=settings.chat_temperature,
-            max_tokens=settings.chat_max_output_tokens,
-            stream=True,
-        )
-        async for event in stream:
-            choices = getattr(event, "choices", [])
-            if not choices:
-                continue
-            content = getattr(getattr(choices[0], "delta", None), "content", None)
-            if content:
-                yield str(content)
+        with DependencySpan("generation_provider", "stream_completion"):
+            stream = await client.chat.completions.create(
+                model=settings.chat_model,
+                messages=prompt_messages,  # type: ignore[arg-type]
+                temperature=settings.chat_temperature,
+                max_tokens=settings.chat_max_output_tokens,
+                stream=True,
+            )
+            async for event in stream:
+                choices = getattr(event, "choices", [])
+                if not choices:
+                    continue
+                content = getattr(getattr(choices[0], "delta", None), "content", None)
+                if content:
+                    yield str(content)
     except Exception as exc:
         raise GenerationUnavailableError(
             "Chat generation is temporarily unavailable"

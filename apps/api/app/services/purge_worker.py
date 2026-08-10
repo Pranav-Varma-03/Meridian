@@ -7,7 +7,10 @@ from pathlib import Path
 from sqlalchemy import delete, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.observability import classify_provider_failure
+from app.core.observability import (
+    classify_provider_failure,
+    record_worker_job_observation,
+)
 from app.models.entities import (
     Document,
     DocumentChunk,
@@ -98,6 +101,9 @@ async def process_purge_job(
         job.status = PurgeJobStatus.complete
         job.completed_at = datetime.now(UTC)
         await session.commit()
+        record_worker_job_observation(
+            worker="purge", operation="purge", outcome="complete"
+        )
         return
 
     generation_ids = (
@@ -187,6 +193,12 @@ async def process_purge_job(
                 "failure_class": classify_provider_failure(exc.__cause__ or exc),
             },
         )
+        record_worker_job_observation(
+            worker="purge",
+            operation="purge",
+            outcome="retryable" if exc.retryable else "terminal_failed",
+            failure_class=classify_provider_failure(exc.__cause__ or exc),
+        )
         return
 
     if job.generation_id:
@@ -236,3 +248,4 @@ async def process_purge_job(
             "attempt": job.attempts,
         },
     )
+    record_worker_job_observation(worker="purge", operation="purge", outcome="complete")

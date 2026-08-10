@@ -1,0 +1,29 @@
+apiVersion: 1
+groups:
+  - orgId: 1
+    name: Meridian operational alerts
+    folder: Meridian
+    interval: 1m
+    rules:
+      - uid: meridian-worker-heartbeat-missing
+        title: Meridian worker heartbeat missing
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: {from: 600, to: 0}
+            datasourceUid: prometheus
+            model:
+              expr: sum(increase(meridian_worker_heartbeats_total{outcome="running"}[5m]))
+              refId: A
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: {type: lt, params: [1]}
+        for: 5m
+        labels: {service: meridian, severity: critical, owner: platform}
+        annotations:
+          runbook_url: https://REPLACE_WITH_INTERNAL_RUNBOOK/meridian-workers
+          dashboard_uid: meridian-overview

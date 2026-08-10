@@ -30,6 +30,10 @@ dependencies = [
     "python-jose[cryptography]>=3.3.0",
     # Utils
     "python-dotenv>=1.0.0",
+    # Observability: OTLP is exported to the deployment's Grafana Alloy collector.
+    "opentelemetry-api>=1.28.0",
+    "opentelemetry-sdk>=1.28.0",
+    "opentelemetry-exporter-otlp-proto-http>=1.28.0",
 ]
 
 [project.optional-dependencies]

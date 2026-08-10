@@ -9,6 +9,7 @@ from redis.exceptions import RedisError
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.observability import record_worker_job_observation
 from app.models.entities import (
     Document,
     DocumentIngestionGeneration,
@@ -521,10 +522,18 @@ async def process_next_ingestion_job(
         return False
 
     claimed_job_id = claimed.job.id
+    created_at = claimed.job.created_at
+    queue_age_ms = (datetime.now(UTC) - created_at).total_seconds() * 1000
 
     try:
         await processor(session, claimed)
         await mark_ingestion_job_ready(session, job_id=claimed_job_id)
+        record_worker_job_observation(
+            worker="ingestion",
+            operation="activation",
+            outcome="complete",
+            queue_age_ms=queue_age_ms,
+        )
         return True
     except RetryableIngestionError as exc:
         await session.rollback()
@@ -537,6 +546,13 @@ async def process_next_ingestion_job(
             retry_max_seconds=retry_max_seconds,
         )
         if requeued:
+            record_worker_job_observation(
+                worker="ingestion",
+                operation="retry",
+                outcome="requeued",
+                queue_age_ms=queue_age_ms,
+                failure_class="retryable",
+            )
             try:
                 await enqueue_ingestion_job(
                     redis_client,
@@ -548,6 +564,14 @@ async def process_next_ingestion_job(
                     "ingestion_retry_queue_unavailable",
                     extra={"error_type": type(enqueue_exc).__name__},
                 )
+        else:
+            record_worker_job_observation(
+                worker="ingestion",
+                operation="activation",
+                outcome="terminal_failed",
+                queue_age_ms=queue_age_ms,
+                failure_class="retryable",
+            )
         return True
     except NonRetryableIngestionError as exc:
         await session.rollback()
@@ -555,6 +579,13 @@ async def process_next_ingestion_job(
             session,
             job_id=claimed_job_id,
             error_message=str(exc),
+        )
+        record_worker_job_observation(
+            worker="ingestion",
+            operation="activation",
+            outcome="terminal_failed",
+            queue_age_ms=queue_age_ms,
+            failure_class="non_retryable",
         )
         return True
     except Exception:
@@ -572,6 +603,13 @@ async def process_next_ingestion_job(
             retry_max_seconds=retry_max_seconds,
         )
         if requeued:
+            record_worker_job_observation(
+                worker="ingestion",
+                operation="retry",
+                outcome="requeued",
+                queue_age_ms=queue_age_ms,
+                failure_class="unknown",
+            )
             try:
                 await enqueue_ingestion_job(
                     redis_client,
@@ -583,4 +621,12 @@ async def process_next_ingestion_job(
                     "ingestion_retry_queue_unavailable",
                     extra={"error_type": type(enqueue_exc).__name__},
                 )
+        else:
+            record_worker_job_observation(
+                worker="ingestion",
+                operation="activation",
+                outcome="terminal_failed",
+                queue_age_ms=queue_age_ms,
+                failure_class="unknown",
+            )
         return True

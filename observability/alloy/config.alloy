@@ -1,0 +1,131 @@
+// Production template: bind this receiver to a private network only. Grafana
+// Cloud credentials are injected by the platform secret manager, never Meridian.
+// Grafana Cloud's OpenTelemetry connection provides a complete Authorization
+// header. Keep its value only in Alloy's host-service environment.
+otelcol.auth.headers "grafana_cloud" {
+	header {
+		key   = "Authorization"
+		value = sys.env("GRAFANA_CLOUD_OTLP_AUTHORIZATION")
+	}
+}
+
+otelcol.receiver.otlp "meridian" {
+	// Loopback-only receivers: Meridian and Alloy run directly on the same host.
+	// Use an mTLS-enabled private network endpoint only if they are split later.
+	grpc {
+		endpoint = "127.0.0.1:4317"
+	}
+
+	http {
+		endpoint = "127.0.0.1:4318"
+	}
+
+	output {
+		metrics = [otelcol.processor.memory_limiter.meridian.input]
+		traces  = [otelcol.processor.memory_limiter.meridian.input]
+		logs    = [otelcol.processor.memory_limiter.meridian.input]
+	}
+}
+
+otelcol.processor.memory_limiter "meridian" {
+	check_interval = "1s"
+	limit          = "512MiB"
+	spike_limit    = "128MiB"
+
+	output {
+		metrics = [otelcol.processor.attributes.safety.input]
+		traces  = [otelcol.processor.attributes.safety.input]
+		logs    = [otelcol.processor.attributes.safety.input]
+	}
+}
+
+// Defense in depth: the application already rejects these fields. The collector
+// drops them again before egress so an accidental future instrumentation change
+// cannot export customer identifiers, prompts, evidence, or credentials.
+otelcol.processor.attributes "safety" {
+	action {
+		key    = "document_id"
+		action = "delete"
+	}
+
+	action {
+		key    = "user_id"
+		action = "delete"
+	}
+
+	action {
+		key    = "collection_id"
+		action = "delete"
+	}
+
+	action {
+		key    = "job_id"
+		action = "delete"
+	}
+
+	action {
+		key    = "query"
+		action = "delete"
+	}
+
+	action {
+		key    = "content"
+		action = "delete"
+	}
+
+	action {
+		key    = "prompt"
+		action = "delete"
+	}
+
+	action {
+		key    = "filename"
+		action = "delete"
+	}
+
+	action {
+		key    = "authorization"
+		action = "delete"
+	}
+
+	output {
+		metrics = [otelcol.processor.batch.meridian.input]
+		traces  = [otelcol.processor.batch.meridian.input]
+		logs    = [otelcol.processor.batch.meridian.input]
+	}
+}
+
+otelcol.processor.batch "meridian" {
+	timeout         = "5s"
+	send_batch_size = 512
+
+	output {
+		metrics = [otelcol.exporter.otlphttp.grafana_cloud.input]
+		traces  = [otelcol.exporter.otlphttp.grafana_cloud.input]
+		logs    = [otelcol.exporter.otlphttp.grafana_cloud.input]
+	}
+}
+
+otelcol.exporter.otlphttp "grafana_cloud" {
+	client {
+		endpoint = sys.env("GRAFANA_CLOUD_OTLP_ENDPOINT")
+		auth     = otelcol.auth.headers.grafana_cloud.handler
+		timeout  = "60s"
+	}
+
+	// Grafana Cloud egress must fail open for Meridian while retaining bounded
+	// batches through transient DNS or network interruptions.
+	retry_on_failure {
+		enabled          = true
+		initial_interval = "5s"
+		max_interval     = "30s"
+		max_elapsed_time = "0s"
+	}
+
+	sending_queue {
+		enabled           = true
+		queue_size        = 1000
+		num_consumers     = 2
+		block_on_overflow = false
+	}
+}

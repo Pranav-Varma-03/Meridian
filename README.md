@@ -81,6 +81,17 @@ requires `OPENROUTER_API_KEY`.
 The web app reads Auth0 values from the same root `.env` file.
 No `.env.local` is required for the current setup.
 
+### Observability configuration
+
+Meridian sends OTLP only to its private Grafana Alloy receiver. Configure the
+signal-specific endpoints as `http://127.0.0.1:4318/v1/traces` and
+`http://127.0.0.1:4318/v1/metrics`; port `12345` is Alloy's health/debug UI,
+not an OTLP endpoint. Never place `OTEL_EXPORTER_OTLP_HEADERS`,
+`OTEL_EXPORTER_OTLP_ENDPOINT`, or any `GRAFANA_CLOUD_*` credentials in
+Meridian's `.env`. Those values are owned by Alloy's host-service environment.
+See [the Alloy host guide](observability/alloy/README.md) and the
+[Swagger-first verification guide](ManualTestGuide/GrafanaObservability.md).
+
 ### 2.1) Web API boundary
 
 The browser does not receive an Auth0 API bearer token. Authenticated browser requests
@@ -641,3 +652,14 @@ Pinecone convergence. Logs are structured and deliberately omit credentials, tok
 prompts, source text, and vectors. Restore from the managed Postgres provider's tested
 point-in-time backup process; after restoration, run Alembic `current`, readiness, and
 the two-document smoke test before accepting traffic.
+
+### Grafana observability
+
+Meridian uses OpenTelemetry internally and sends telemetry only to a private Grafana
+Alloy receiver. Alloy forwards metrics, traces, and compatible structured logs to
+Grafana Cloud; applications must never receive Grafana Cloud credentials or send
+telemetry directly to the public internet. Deployment templates, dashboard and alert
+provisioning assets are in `observability/`. Follow
+`ManualTestGuide/GrafanaObservability.md` after deployment. Before production, set
+the alert destinations, dashboard datasource UID, SLO baselines, and secret-managed
+Grafana Cloud credentials for the target environment.

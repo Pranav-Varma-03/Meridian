@@ -2,6 +2,8 @@
 
 import asyncio
 import hashlib
+import logging
+import time
 import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -13,6 +15,12 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
+from app.core.observability import (
+    DependencySpan,
+    record_rag_stage_observation,
+    record_retrieval_observation,
+    retrieval_event,
+)
 from app.models.entities import (
     Collection,
     Document,
@@ -38,6 +46,9 @@ class CollectionAccessError(Exception):
 
 class RetrievalUnavailableError(Exception):
     """Raised when an embedding or vector dependency cannot serve a request."""
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -165,28 +176,29 @@ async def _hydrate_active_chunks(
         return []
 
     chunk_ids = [candidate.chunk_id for candidate in candidates]
-    result = await session.execute(
-        select(
-            DocumentChunk.id,
-            DocumentChunk.document_id,
-            DocumentIngestionGeneration.generation_number,
-            DocumentChunk.chunk_text,
-            Document.filename,
-            DocumentChunk.metadata_json,
+    with DependencySpan("postgres", "lifecycle_hydration"):
+        result = await session.execute(
+            select(
+                DocumentChunk.id,
+                DocumentChunk.document_id,
+                DocumentIngestionGeneration.generation_number,
+                DocumentChunk.chunk_text,
+                Document.filename,
+                DocumentChunk.metadata_json,
+            )
+            .join(Document, Document.id == DocumentChunk.document_id)
+            .join(
+                DocumentIngestionGeneration,
+                DocumentIngestionGeneration.id == DocumentChunk.generation_id,
+            )
+            .where(
+                DocumentChunk.id.in_(chunk_ids),
+                Document.user_id == user_id,
+                Document.lifecycle_status == DocumentLifecycleStatus.active,
+                Document.active_generation_id == DocumentIngestionGeneration.id,
+                DocumentIngestionGeneration.status == GenerationStatus.active,
+            )
         )
-        .join(Document, Document.id == DocumentChunk.document_id)
-        .join(
-            DocumentIngestionGeneration,
-            DocumentIngestionGeneration.id == DocumentChunk.generation_id,
-        )
-        .where(
-            DocumentChunk.id.in_(chunk_ids),
-            Document.user_id == user_id,
-            Document.lifecycle_status == DocumentLifecycleStatus.active,
-            Document.active_generation_id == DocumentIngestionGeneration.id,
-            DocumentIngestionGeneration.status == GenerationStatus.active,
-        )
-    )
     chunks = {
         chunk_id: (document_id, generation, chunk_text, filename, metadata or {})
         for chunk_id, document_id, generation, chunk_text, filename, metadata in result.all()
@@ -387,10 +399,12 @@ async def retrieve_sources(
     reranker: Reranker | None = None,
 ) -> list[RetrievedSource]:
     """Query one owner namespace then prove each returned match is live in Postgres."""
+    retrieval_started = time.perf_counter()
     selected_collections = collection_ids or []
     await _validate_collection_ids(
         session, user_id=user_id, collection_ids=selected_collections
     )
+    dense_started = time.perf_counter()
     try:
         vector = await embeddings.embed_query(
             provider=settings.embedding_provider,
@@ -405,28 +419,48 @@ async def retrieve_sources(
                 "collection_id": {"$in": [str(value) for value in selected_collections]}
             }
         index = pinecone_client.Index(settings.pinecone_index_name)
-        response = await asyncio.to_thread(
-            index.query,
-            vector=vector,
-            top_k=settings.chat_retrieval_top_k * settings.chat_retrieval_overfetch,
-            namespace=embeddings.build_pinecone_namespace(user_id=user_id),
-            include_metadata=True,
-            filter=metadata_filter,
-        )
+        with DependencySpan("pinecone", "query"):
+            response = await asyncio.to_thread(
+                index.query,
+                vector=vector,
+                top_k=settings.chat_retrieval_top_k * settings.chat_retrieval_overfetch,
+                namespace=embeddings.build_pinecone_namespace(user_id=user_id),
+                include_metadata=True,
+                filter=metadata_filter,
+            )
     except ValueError:
+        record_rag_stage_observation(
+            stage="dense",
+            outcome="validation_failure",
+            duration_ms=(time.perf_counter() - dense_started) * 1000,
+        )
         raise
     except Exception as exc:
+        record_rag_stage_observation(
+            stage="dense",
+            outcome="failure",
+            duration_ms=(time.perf_counter() - dense_started) * 1000,
+        )
         raise RetrievalUnavailableError("Retrieval is temporarily unavailable") from exc
+
+    record_rag_stage_observation(
+        stage="dense",
+        outcome="success",
+        duration_ms=(time.perf_counter() - dense_started) * 1000,
+    )
 
     matches = getattr(response, "matches", None)
     if matches is None and isinstance(response, Mapping):
         matches = response.get("matches", [])
     dense_candidates = _dense_candidates(list(matches or []))
+    lexical_candidates: list[RetrievalCandidate] = []
+    lexical_degraded = False
     selected_candidates: list[RetrievalCandidate] | list[FusedCandidate] = (
         dense_candidates
     )
 
     if settings.retrieval_mode != "dense":
+        lexical_started = time.perf_counter()
         try:
             lexical_candidates = await retrieve_lexical_candidates(
                 session=session,
@@ -440,10 +474,28 @@ async def retrieve_sources(
                 settings.retrieval_mode == "hybrid"
                 and settings.lexical_degradation_mode != "dense_only"
             ):
+                record_rag_stage_observation(
+                    stage="lexical",
+                    outcome="failure",
+                    duration_ms=(time.perf_counter() - lexical_started) * 1000,
+                )
                 raise RetrievalUnavailableError(
                     "Lexical retrieval is temporarily unavailable"
                 ) from exc
-            lexical_candidates = []
+            lexical_degraded = True
+            record_rag_stage_observation(
+                stage="lexical",
+                outcome="degraded",
+                duration_ms=(time.perf_counter() - lexical_started) * 1000,
+                degraded=True,
+            )
+        else:
+            record_rag_stage_observation(
+                stage="lexical",
+                outcome="success",
+                duration_ms=(time.perf_counter() - lexical_started) * 1000,
+            )
+        fusion_started = time.perf_counter()
         fused = fuse_ranked_candidates(
             [*dense_candidates, *lexical_candidates],
             rrf_k=settings.retrieval_rrf_k,
@@ -452,18 +504,43 @@ async def retrieve_sources(
         )
         if settings.retrieval_mode == "hybrid":
             selected_candidates = fused
+        record_rag_stage_observation(
+            stage="fusion",
+            outcome="success",
+            duration_ms=(time.perf_counter() - fusion_started) * 1000,
+        )
 
+    retrieval_event(
+        logger,
+        "retrieval_completed",
+        mode=settings.retrieval_mode,
+        dense_count=len(dense_candidates),
+        selected_count=len(selected_candidates),
+    )
+
+    hydration_started = time.perf_counter()
     normalized = await _hydrate_active_chunks(
         session,
         user_id=user_id,
         candidates=selected_candidates,
     )
+    record_rag_stage_observation(
+        stage="lifecycle_hydration",
+        outcome="success",
+        duration_ms=(time.perf_counter() - hydration_started) * 1000,
+    )
     if settings.retrieval_expansion_enabled:
+        expansion_started = time.perf_counter()
         normalized = await _expand_lifecycle_valid_sources(
             session,
             user_id=user_id,
             sources=normalized,
             collection_ids=selected_collections,
+        )
+        record_rag_stage_observation(
+            stage="expansion",
+            outcome="success",
+            duration_ms=(time.perf_counter() - expansion_started) * 1000,
         )
     qualifying = (
         normalized
@@ -479,11 +556,17 @@ async def retrieve_sources(
     if reranker is not None and (
         settings.reranking_enabled or settings.reranking_shadow_enabled
     ):
+        reranking_started = time.perf_counter()
         try:
             reranked = await apply_reranker(
                 reranker=reranker, query=query, sources=qualifying
             )
         except Exception as exc:
+            record_rag_stage_observation(
+                stage="reranking",
+                outcome="failure",
+                duration_ms=(time.perf_counter() - reranking_started) * 1000,
+            )
             if (
                 settings.reranking_enabled
                 and settings.lexical_degradation_mode == "fail"
@@ -494,4 +577,31 @@ async def retrieve_sources(
         else:
             if settings.reranking_enabled:
                 qualifying = reranked
+            record_rag_stage_observation(
+                stage="reranking",
+                outcome="success",
+                duration_ms=(time.perf_counter() - reranking_started) * 1000,
+            )
+    fusion_overlap = sum(
+        candidate.dense_rank is not None and candidate.lexical_rank is not None
+        for candidate in selected_candidates
+        if isinstance(candidate, FusedCandidate)
+    )
+    total_latency_ms = round((time.perf_counter() - retrieval_started) * 1000, 2)
+    record_retrieval_observation(
+        mode=settings.retrieval_mode,
+        dense_count=len(dense_candidates),
+        lexical_count=len(lexical_candidates),
+        fusion_overlap=fusion_overlap,
+        selected_count=len(selected_candidates),
+        qualifying_count=len(qualifying),
+        degraded=lexical_degraded,
+        total_latency_ms=total_latency_ms,
+    )
+    record_rag_stage_observation(
+        stage="evidence_selection",
+        outcome="success",
+        duration_ms=total_latency_ms,
+        degraded=lexical_degraded,
+    )
     return qualifying

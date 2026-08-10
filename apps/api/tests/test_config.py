@@ -33,6 +33,73 @@ def test_settings_normalizes_openrouter_base_url(
     assert Settings().openrouter_base_url == "https://openrouter.ai/api/v1"
 
 
+def test_settings_require_both_otlp_endpoints_when_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    set_required_env(monkeypatch)
+    monkeypatch.setenv("OBSERVABILITY_ENABLED", "true")
+    monkeypatch.setenv(
+        "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+        "https://collector.example.com/v1/traces",
+    )
+    # Do not inherit a developer's local Alloy endpoint from Meridian/.env.
+    monkeypatch.setenv("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT", "")
+
+    with pytest.raises(ValidationError, match="OBSERVABILITY_ENABLED"):
+        Settings()
+
+
+def test_settings_accept_otlp_endpoints_when_observability_is_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    set_required_env(monkeypatch)
+    monkeypatch.setenv("OBSERVABILITY_ENABLED", "true")
+    monkeypatch.setenv(
+        "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+        "https://collector.example.com/v1/traces",
+    )
+    monkeypatch.setenv(
+        "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT",
+        "https://collector.example.com/v1/metrics",
+    )
+
+    settings = Settings()
+
+    assert settings.observability_enabled is True
+
+
+@pytest.mark.parametrize(
+    ("setting", "value"),
+    [
+        ("OTEL_EXPORTER_OTLP_HEADERS", "Authorization=Basic secret"),
+        ("OTEL_EXPORTER_OTLP_ENDPOINT", "https://otlp-gateway.example/otlp"),
+        ("GRAFANA_CLOUD_OTLP_ENDPOINT", "https://otlp-gateway.example/otlp"),
+        ("GRAFANA_CLOUD_OTLP_AUTHORIZATION", "Basic secret"),
+    ],
+)
+def test_settings_reject_direct_grafana_cloud_configuration(
+    monkeypatch: pytest.MonkeyPatch, setting: str, value: str
+) -> None:
+    set_required_env(monkeypatch)
+    monkeypatch.setenv(setting, value)
+
+    with pytest.raises(ValidationError, match="Grafana Cloud credentials"):
+        Settings()
+
+
+def test_settings_reject_grafana_cloud_as_an_application_otlp_endpoint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    set_required_env(monkeypatch)
+    monkeypatch.setenv(
+        "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+        "https://otlp-gateway-prod-ap-south-1.grafana.net/otlp/v1/traces",
+    )
+
+    with pytest.raises(ValidationError, match="private Grafana Alloy collector"):
+        Settings()
+
+
 def test_settings_reject_non_supabase_ssl_mode(monkeypatch: pytest.MonkeyPatch) -> None:
     set_required_env(monkeypatch)
     monkeypatch.setenv(

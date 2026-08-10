@@ -1,0 +1,44 @@
+{
+  "version": "representative_corpus_v1",
+  "classification": "de-identified-disposable",
+  "source_fixture_directory": "../retrieval_evaluation/documents",
+  "document_set": [
+    "travel-policy.txt",
+    "contract.txt",
+    "pricing.txt",
+    "exception-policy.txt",
+    "msa.txt",
+    "retention-policy-a.txt",
+    "retention-policy-b.txt",
+    "onboarding-guide.txt",
+    "onboarding-checklist.txt",
+    "employee-handbook.txt"
+  ],
+  "owner_profiles": [
+    {"name": "small", "owners": 10, "documents_per_owner": 10, "replicas_per_document": 1},
+    {"name": "expected", "owners": 25, "documents_per_owner": 20, "replicas_per_document": 2},
+    {"name": "burst", "owners": 50, "documents_per_owner": 30, "replicas_per_document": 3}
+  ],
+  "query_mix": {
+    "semantic": 0.45,
+    "exact_identifier": 0.25,
+    "numbered_clause": 0.15,
+    "unanswerable": 0.15
+  },
+  "load_profiles": {
+    "expected_concurrency": 10,
+    "burst_concurrency": 25,
+    "duration_seconds": 300,
+    "lexical_statement_timeout_ms": 250
+  },
+  "acceptance_measurements": [
+    "p50_latency_ms",
+    "p95_latency_ms",
+    "p99_latency_ms",
+    "error_rate",
+    "timeout_rate",
+    "connection_pool_saturation",
+    "selected_query_plan_indexes",
+    "active_metric_series"
+  ]
+}

@@ -9,7 +9,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
 from app.core.database import AsyncSessionLocal
-from app.core.observability import SecretSafeJsonFormatter, classify_provider_failure
+from app.core.observability import (
+    SecretSafeJsonFormatter,
+    classify_provider_failure,
+    initialize_observability,
+    record_ingestion_outcome,
+    record_ingestion_prepared,
+    record_worker_heartbeat,
+    retrieval_event,
+)
 from app.services import (
     contextual_chunking,
     document_parsing,
@@ -32,6 +40,7 @@ logging.basicConfig(
     force=True,
 )
 logger = logging.getLogger(__name__)
+initialize_observability(settings)
 pinecone_client = Pinecone(api_key=settings.pinecone_api_key)
 openai_client = (
     AsyncOpenAI(api_key=settings.openai_api_key) if settings.openai_api_key else None
@@ -123,11 +132,13 @@ async def default_ingestion_processor(
             getattr(generation, "configuration_json", None)
         )
     )
+    strategy_version = "legacy_character_v1"
     try:
         if is_structured:
             configuration = generation.configuration_json
             parser = configuration["parser"]
             chunker = configuration["chunker"]
+            strategy_version = chunker["strategy"]
             elements = document_parsing.parse_document(
                 storage_path=storage_path,
                 mime_type=claimed_job.document.mime_type,
@@ -167,6 +178,23 @@ async def default_ingestion_processor(
                     children=children,
                     parents=parents,
                 )
+            )
+            retrieval_event(
+                logger,
+                "structured_ingestion_prepared",
+                generation_id=str(generation.id),
+                element_count=len(elements),
+                child_count=len(children),
+                parent_count=len(parents),
+                strategy_version=chunker["strategy"],
+            )
+            record_ingestion_prepared(
+                parser_provider=parser["provider"],
+                strategy_version=chunker["strategy"],
+                element_count=len(elements),
+                child_count=len(children),
+                parent_count=len(parents),
+                child_token_total=sum(child.token_count for child in children),
             )
             document_text = "\n\n".join(element.text for element in elements)
         else:
@@ -213,6 +241,11 @@ async def default_ingestion_processor(
         OSError,
         ValueError,
     ) as exc:
+        record_ingestion_outcome(
+            outcome="failed",
+            strategy_version=strategy_version,
+            failure_class="parser",
+        )
         raise ingestion_worker.NonRetryableIngestionError(
             "Unable to parse and structure document content"
         ) from exc
@@ -324,9 +357,19 @@ async def default_ingestion_processor(
             job_id=claimed_job.job.id,
         )
         if not activated:
+            record_ingestion_outcome(
+                outcome="failed",
+                strategy_version=strategy_version,
+                failure_class="activation",
+            )
             raise ingestion_worker.NonRetryableIngestionError(
                 "Generation activation fenced by document lifecycle"
             )
+
+    record_ingestion_outcome(
+        outcome="ready",
+        strategy_version=strategy_version,
+    )
 
     logger.info(
         "processing_ingestion_job",
@@ -367,6 +410,7 @@ async def run_worker_loop() -> None:
 
     try:
         while True:
+            record_worker_heartbeat(worker="ingestion")
             async with AsyncSessionLocal() as session:
                 recovered = await ingestion_worker.recover_stuck_ingestion_jobs(
                     session,
