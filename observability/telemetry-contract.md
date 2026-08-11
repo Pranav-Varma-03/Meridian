@@ -6,15 +6,17 @@
 | --- | --- | --- | --- | --- |
 | Metrics | OpenTelemetry Metrics | Grafana Alloy | Grafana Mimir | Platform engineering |
 | Traces | OpenTelemetry Tracing | Grafana Alloy | Grafana Tempo | Platform engineering |
-| Logs | Secret-safe JSON stdout | Grafana Alloy | Grafana Loki | Platform engineering |
+| Logs | Explicit allowlisted OTLP event bridge; safe JSON stdout remains local | Grafana Alloy | Grafana Loki | Platform engineering |
 
 ## Approved attributes
 
 Only bounded values may be exported: service/environment/deployment identity,
 route template, HTTP method and status class, operation/stage, dependency,
 outcome, safe failure class, retrieval mode, strategy/configuration version,
-counts, attempts, and duration. `request_id` is local log correlation only and
-MUST NOT become a metric label or resource attribute.
+counts, attempts, and duration. `request_id` is local stdout-only correlation
+and MUST NOT become a metric label, resource attribute, or exported OTLP log
+attribute. Exported OTLP log bodies are bounded event names, never raw Python
+log records or exception messages.
 
 ## Prohibited data
 

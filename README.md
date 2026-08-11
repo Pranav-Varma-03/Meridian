@@ -84,9 +84,12 @@ No `.env.local` is required for the current setup.
 ### Observability configuration
 
 Meridian sends OTLP only to its private Grafana Alloy receiver. Configure the
-signal-specific endpoints as `http://127.0.0.1:4318/v1/traces` and
-`http://127.0.0.1:4318/v1/metrics`; port `12345` is Alloy's health/debug UI,
-not an OTLP endpoint. Never place `OTEL_EXPORTER_OTLP_HEADERS`,
+signal-specific endpoints as `http://127.0.0.1:4318/v1/traces`,
+`http://127.0.0.1:4318/v1/metrics`, and
+`http://127.0.0.1:4318/v1/logs`; port `12345` is Alloy's health/debug UI,
+not an OTLP endpoint. Meridian exports only bounded event names and
+allowlisted operational attributes to Loki; it keeps JSON stdout logs locally
+and does not attach a generic OTLP handler to the root logger. Never place `OTEL_EXPORTER_OTLP_HEADERS`,
 `OTEL_EXPORTER_OTLP_ENDPOINT`, or any `GRAFANA_CLOUD_*` credentials in
 Meridian's `.env`. Those values are owned by Alloy's host-service environment.
 See [the Alloy host guide](observability/alloy/README.md) and the

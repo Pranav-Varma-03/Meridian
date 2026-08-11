@@ -43,6 +43,54 @@
       "targets": [{"expr": "histogram_quantile(0.95, sum by (le, stage) (rate(meridian_rag_stage_duration_ms_bucket[5m])))", "refId": "A"}],
       "title": "RAG stage p95 latency",
       "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "loki", "uid": "${DS_LOKI}"},
+      "gridPos": {"h": 10, "w": 24, "x": 0, "y": 24},
+      "id": 6,
+      "targets": [{"expr": "{service_name=\"meridian-api\"}", "refId": "A"}],
+      "title": "Meridian application logs",
+      "type": "logs"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 34},
+      "id": 7,
+      "targets": [{"expr": "histogram_quantile(0.95, sum by (le, dependency) (rate(meridian_dependency_duration_ms_bucket[5m])))", "refId": "A"}],
+      "title": "Dependency p95 latency",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 34},
+      "id": 8,
+      "targets": [{"expr": "sum by (stage, outcome) (rate(meridian_worker_heartbeats_total[5m]))", "refId": "A"}],
+      "title": "Worker heartbeat",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 42},
+      "id": 9,
+      "targets": [{"expr": "sum by (route, status_class) (rate(meridian_http_requests_total[5m]))", "refId": "A"}],
+      "title": "API RED by route and status class",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 42},
+      "id": 10,
+      "targets": [{"expr": "sum(rate(otelcol_exporter_send_failed_log_records_total[5m])) + sum(rate(otelcol_exporter_send_failed_metric_points_total[5m])) + sum(rate(otelcol_exporter_send_failed_spans_total[5m]))", "refId": "A"}],
+      "title": "Alloy export failures",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 50},
+      "id": 11,
+      "targets": [{"expr": "sum by (mode, degraded) (rate(meridian_retrieval_requests_total[5m]))", "refId": "A"}],
+      "title": "Retrieval rollout comparison",
+      "type": "timeseries"
     }
   ],
   "schemaVersion": 39,
@@ -51,5 +99,5 @@
   "time": {"from": "now-6h", "to": "now"},
   "title": "Meridian operational overview",
   "uid": "meridian-overview",
-  "version": 1
+  "version": 2
 }

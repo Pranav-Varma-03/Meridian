@@ -21,6 +21,7 @@ class Settings(BaseSettings):
     otel_service_name: str = "meridian-api"
     otel_exporter_otlp_traces_endpoint: str | None = None
     otel_exporter_otlp_metrics_endpoint: str | None = None
+    otel_exporter_otlp_logs_endpoint: str | None = None
     # These aliases deliberately fail fast when direct-cloud settings leak into
     # a Meridian workload. Grafana Alloy is the sole egress and credential
     # boundary; applications may only authenticate to private collectors.
@@ -313,6 +314,7 @@ class Settings(BaseSettings):
     @field_validator(
         "otel_exporter_otlp_traces_endpoint",
         "otel_exporter_otlp_metrics_endpoint",
+        "otel_exporter_otlp_logs_endpoint",
     )
     @classmethod
     def validate_otel_endpoint(cls, value: str | None) -> str | None:
@@ -377,10 +379,12 @@ class Settings(BaseSettings):
         if self.observability_enabled and (
             not self.otel_exporter_otlp_traces_endpoint
             or not self.otel_exporter_otlp_metrics_endpoint
+            or not self.otel_exporter_otlp_logs_endpoint
         ):
             raise ValueError(
                 "OBSERVABILITY_ENABLED requires OTEL_EXPORTER_OTLP_TRACES_ENDPOINT "
-                "and OTEL_EXPORTER_OTLP_METRICS_ENDPOINT"
+                "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT, and "
+                "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT"
             )
         if (
             self.embedding_provider == "pinecone"

@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.observability import (
     classify_provider_failure,
+    lifecycle_event,
     record_worker_job_observation,
 )
 from app.models.entities import (
@@ -182,16 +183,13 @@ async def process_purge_job(
                 seconds=min(300, 2**job.attempts)
             )
         await session.commit()
-        logger.warning(
+        lifecycle_event(
+            logger,
             "purge_job_retryable" if exc.retryable else "purge_job_terminal_failed",
-            extra={
-                "purge_job_id": str(job.id),
-                "document_id": str(document.id),
-                "generation_id": str(job.generation_id) if job.generation_id else None,
-                "vector_count": len(vector_ids),
-                "attempt": job.attempts,
-                "failure_class": classify_provider_failure(exc.__cause__ or exc),
-            },
+            level=logging.WARNING,
+            count=len(vector_ids),
+            attempts=job.attempts,
+            failure_class=classify_provider_failure(exc.__cause__ or exc),
         )
         record_worker_job_observation(
             worker="purge",
@@ -238,14 +236,10 @@ async def process_purge_job(
     job.started_at = None
     job.completed_at = datetime.now(UTC)
     await session.commit()
-    logger.info(
+    lifecycle_event(
+        logger,
         "purge_job_complete",
-        extra={
-            "purge_job_id": str(job.id),
-            "document_id": str(document.id),
-            "generation_id": str(job.generation_id) if job.generation_id else None,
-            "vector_count": len(vector_ids),
-            "attempt": job.attempts,
-        },
+        count=len(vector_ids),
+        attempts=job.attempts,
     )
     record_worker_job_observation(worker="purge", operation="purge", outcome="complete")

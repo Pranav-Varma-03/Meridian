@@ -10,13 +10,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import get_settings
 from app.core.database import AsyncSessionLocal
 from app.core.observability import (
-    SecretSafeJsonFormatter,
     classify_provider_failure,
+    configure_application_logging,
     initialize_observability,
+    lifecycle_event,
     record_ingestion_outcome,
     record_ingestion_prepared,
     record_worker_heartbeat,
     retrieval_event,
+    shutdown_observability,
 )
 from app.services import (
     contextual_chunking,
@@ -32,13 +34,7 @@ from app.services import (
 
 settings = get_settings()
 
-_handler = logging.StreamHandler()
-_handler.setFormatter(SecretSafeJsonFormatter())
-logging.basicConfig(
-    level=getattr(logging, settings.log_level, logging.INFO),
-    handlers=[_handler],
-    force=True,
-)
+configure_application_logging(settings.log_level)
 logger = logging.getLogger(__name__)
 initialize_observability(settings)
 pinecone_client = Pinecone(api_key=settings.pinecone_api_key)
@@ -70,9 +66,11 @@ async def _embed_chunks_with_retry(
             )
         except Exception as exc:
             if attempt >= max_attempts:
-                logger.warning(
+                lifecycle_event(
+                    logger,
                     "embedding_provider_retry_exhausted",
-                    extra={"failure_class": classify_provider_failure(exc)},
+                    level=logging.WARNING,
+                    failure_class=classify_provider_failure(exc),
                 )
                 raise ingestion_worker.RetryableIngestionError(
                     "Embedding provider failed after retries"
@@ -97,9 +95,11 @@ async def _upsert_embeddings_with_retry(
             return
         except Exception as exc:
             if attempt >= max_attempts:
-                logger.warning(
+                lifecycle_event(
+                    logger,
                     "vector_upsert_retry_exhausted",
-                    extra={"failure_class": classify_provider_failure(exc)},
+                    level=logging.WARNING,
+                    failure_class=classify_provider_failure(exc),
                 )
                 raise ingestion_worker.RetryableIngestionError(
                     "Vector provider failed after retries"
@@ -371,14 +371,11 @@ async def default_ingestion_processor(
         strategy_version=strategy_version,
     )
 
-    logger.info(
+    lifecycle_event(
+        logger,
         "processing_ingestion_job",
-        extra={
-            "job_id": str(claimed_job.job.id),
-            "document_id": str(claimed_job.document.id),
-            "attempts": claimed_job.job.attempts,
-            "chunk_count": len(persisted_chunks),
-        },
+        attempts=claimed_job.job.attempts,
+        count=len(persisted_chunks),
     )
 
 
@@ -394,18 +391,18 @@ async def run_worker_loop() -> None:
     try:
         await redis_client.ping()
     except RedisError as exc:
-        logger.warning(
+        lifecycle_event(
+            logger,
             "ingestion_queue_startup_unavailable_using_database_fallback",
-            extra={"error_type": type(exc).__name__},
+            level=logging.WARNING,
+            error_type=type(exc).__name__,
         )
 
-    logger.info(
+    lifecycle_event(
+        logger,
         "ingestion_worker_started",
-        extra={
-            "queue_key": settings.ingestion_queue_key,
-            "dequeue_timeout_seconds": settings.ingestion_worker_dequeue_timeout_seconds,
-            "max_attempts": settings.ingestion_worker_max_attempts,
-        },
+        dequeue_timeout_seconds=settings.ingestion_worker_dequeue_timeout_seconds,
+        max_attempts=settings.ingestion_worker_max_attempts,
     )
 
     try:
@@ -420,9 +417,11 @@ async def run_worker_loop() -> None:
                     retry_max_seconds=settings.ingestion_retry_max_seconds,
                 )
                 if recovered:
-                    logger.warning(
+                    lifecycle_event(
+                        logger,
                         "ingestion_worker_recovered_stuck_jobs",
-                        extra={"count": recovered},
+                        level=logging.WARNING,
+                        count=recovered,
                     )
                 processed = await ingestion_worker.process_next_ingestion_job(
                     session,
@@ -445,7 +444,10 @@ async def run_worker_loop() -> None:
 
 
 def main() -> None:
-    asyncio.run(run_worker_loop())
+    try:
+        asyncio.run(run_worker_loop())
+    finally:
+        shutdown_observability()
 
 
 if __name__ == "__main__":

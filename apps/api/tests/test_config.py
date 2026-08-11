@@ -49,6 +49,26 @@ def test_settings_require_both_otlp_endpoints_when_enabled(
         Settings()
 
 
+def test_settings_require_logs_endpoint_when_observability_is_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    set_required_env(monkeypatch)
+    monkeypatch.setenv("OBSERVABILITY_ENABLED", "true")
+    monkeypatch.setenv(
+        "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+        "https://collector.example.com/v1/traces",
+    )
+    monkeypatch.setenv(
+        "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT",
+        "https://collector.example.com/v1/metrics",
+    )
+    # Do not inherit a developer's local Alloy endpoint from Meridian/.env.
+    monkeypatch.setenv("OTEL_EXPORTER_OTLP_LOGS_ENDPOINT", "")
+
+    with pytest.raises(ValidationError, match="OTEL_EXPORTER_OTLP_LOGS_ENDPOINT"):
+        Settings()
+
+
 def test_settings_accept_otlp_endpoints_when_observability_is_enabled(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

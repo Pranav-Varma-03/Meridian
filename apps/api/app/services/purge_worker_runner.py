@@ -8,20 +8,16 @@ from pinecone import Pinecone
 from app.core.config import get_settings
 from app.core.database import AsyncSessionLocal
 from app.core.observability import (
-    SecretSafeJsonFormatter,
+    configure_application_logging,
     initialize_observability,
+    lifecycle_event,
     record_worker_heartbeat,
+    shutdown_observability,
 )
 from app.services import purge_worker
 
 settings = get_settings()
-_handler = logging.StreamHandler()
-_handler.setFormatter(SecretSafeJsonFormatter())
-logging.basicConfig(
-    level=getattr(logging, settings.log_level, logging.INFO),
-    handlers=[_handler],
-    force=True,
-)
+configure_application_logging(settings.log_level)
 logger = logging.getLogger(__name__)
 initialize_observability(settings)
 pinecone_client = Pinecone(api_key=settings.pinecone_api_key)
@@ -36,8 +32,11 @@ async def run_worker_loop() -> None:
                 stuck_timeout_seconds=settings.purge_worker_stuck_timeout_seconds,
             )
             if recovered:
-                logger.warning(
-                    "purge_worker_recovered_stuck_jobs", extra={"count": recovered}
+                lifecycle_event(
+                    logger,
+                    "purge_worker_recovered_stuck_jobs",
+                    level=logging.WARNING,
+                    count=recovered,
                 )
             job = await purge_worker.claim_next_purge_job(session)
             if job is not None:
@@ -55,7 +54,10 @@ async def run_worker_loop() -> None:
 
 
 def main() -> None:
-    asyncio.run(run_worker_loop())
+    try:
+        asyncio.run(run_worker_loop())
+    finally:
+        shutdown_observability()
 
 
 if __name__ == "__main__":

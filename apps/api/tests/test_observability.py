@@ -1,6 +1,11 @@
 import json
 import logging
 
+import pytest
+from httpx import ASGITransport, AsyncClient
+
+from app import main as main_module
+from app.core import observability
 from app.core.observability import (
     APPROVED_TELEMETRY_ATTRIBUTE_KEYS,
     RETRIEVAL_OPERATIONAL_THRESHOLDS,
@@ -104,3 +109,133 @@ def test_worker_and_rag_observations_use_bounded_operational_labels() -> None:
     record_rag_stage_observation(
         stage="lifecycle_hydration", outcome="success", duration_ms=8.4
     )
+
+
+def test_otlp_log_bridge_exports_only_allowlisted_attributes() -> None:
+    class CapturingOtelLogger:
+        def __init__(self) -> None:
+            self.records = []
+
+        def emit(self, record) -> None:
+            self.records.append(record)
+
+    assert hasattr(observability, "emit_safe_otlp_log")
+    destination = CapturingOtelLogger()
+    observability.emit_safe_otlp_log(
+        "chat_completed",
+        level=logging.INFO,
+        fields={
+            "status_code": 200,
+            "request_id": "request-canary-must-not-export",
+            "document_id": "document-canary-must-not-export",
+            "query": "query-canary-must-not-export",
+            "unknown_extra": "unknown-canary-must-not-export",
+            "error_message": "exception-canary-must-not-export",
+        },
+        otlp_logger=destination,
+    )
+
+    assert len(destination.records) == 1
+    record = destination.records[0]
+    assert record.body == "chat_completed"
+    assert record.attributes == {"status_code": 200}
+    serialized = f"{record.body} {record.attributes}"
+    assert "canary-must-not-export" not in serialized
+
+
+def test_otlp_log_bridge_fails_open_when_exporter_raises() -> None:
+    class FailingOtelLogger:
+        def emit(self, record) -> None:
+            raise RuntimeError("collector failure")
+
+    assert hasattr(observability, "emit_safe_otlp_log")
+    observability.emit_safe_otlp_log(
+        "ingestion_completed",
+        fields={"outcome": "success"},
+        otlp_logger=FailingOtelLogger(),
+    )
+
+
+def test_canonical_route_registry_uses_full_included_router_templates() -> None:
+    def list_documents() -> None:
+        return None
+
+    def get_document() -> None:
+        return None
+
+    class ChildRoute:
+        def __init__(self, endpoint, path_format: str) -> None:
+            self.endpoint = endpoint
+            self.path_format = path_format
+
+    class IncludedRoute:
+        def __init__(self) -> None:
+            self.original_router = type(
+                "Router",
+                (),
+                {
+                    "routes": [
+                        ChildRoute(list_documents, ""),
+                        ChildRoute(get_document, "/{document_id}"),
+                    ]
+                },
+            )()
+            self.include_context = type(
+                "IncludeContext", (), {"prefix": "/api/v1/documents"}
+            )()
+
+    assert hasattr(observability, "build_route_template_registry")
+    registry = observability.build_route_template_registry([IncludedRoute()])
+
+    assert registry[list_documents] == "/api/v1/documents"
+    assert registry[get_document] == "/api/v1/documents/{document_id}"
+
+
+@pytest.mark.asyncio
+async def test_documents_request_records_the_full_route_template(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observations: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        main_module,
+        "record_http_observation",
+        lambda **kwargs: observations.append(kwargs),
+    )
+
+    transport = ASGITransport(app=main_module.app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.get("/api/v1/documents?limit=10&offset=0")
+
+    assert response.status_code == 401
+    assert observations == [
+        {
+            "method": "GET",
+            "route": "/api/v1/documents",
+            "status_code": 401,
+            "duration_ms": pytest.approx(observations[0]["duration_ms"]),
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_route_telemetry_uses_parameterized_templates_and_unmatched_label(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observations: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        main_module,
+        "record_http_observation",
+        lambda **kwargs: observations.append(kwargs),
+    )
+
+    transport = ASGITransport(app=main_module.app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        await client.get("/api/v1/documents/00000000-0000-0000-0000-000000000001")
+        await client.get("/api/v1/collections/00000000-0000-0000-0000-000000000002")
+        await client.get("/api/v1/no-such-route?document_id=must-not-be-exported")
+
+    assert [observation["route"] for observation in observations] == [
+        "/api/v1/documents/{document_id}",
+        "/api/v1/collections/{collection_id}",
+        "unmatched",
+    ]

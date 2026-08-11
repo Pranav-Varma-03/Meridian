@@ -16,10 +16,13 @@ from app.core.config import get_settings
 from app.core.database import AsyncSessionLocal, close_db, init_db
 from app.core.observability import (
     DependencySpan,
-    SecretSafeJsonFormatter,
+    build_route_template_registry,
+    configure_application_logging,
     initialize_observability,
     lifecycle_event,
     record_http_observation,
+    resolve_route_template,
+    shutdown_observability,
 )
 from app.routers import (
     auth_diagnostics,
@@ -33,13 +36,7 @@ from app.routers import (
 
 settings = get_settings()
 
-_handler = logging.StreamHandler()
-_handler.setFormatter(SecretSafeJsonFormatter())
-logging.basicConfig(
-    level=getattr(logging, settings.log_level, logging.INFO),
-    handlers=[_handler],
-    force=True,
-)
+configure_application_logging(settings.log_level)
 logger = logging.getLogger(__name__)
 initialize_observability(settings)
 tracer = trace.get_tracer("meridian.api")
@@ -93,6 +90,7 @@ async def lifespan(app: FastAPI):
     await close_db()
 
     lifecycle_event(logger, "api_stopped")
+    shutdown_observability()
 
 
 app = FastAPI(
@@ -111,8 +109,7 @@ async def request_context_middleware(request: Request, call_next):
     with tracer.start_as_current_span("http.request") as span:
         response = await call_next(request)
         duration_ms = round((time.perf_counter() - start) * 1000, 2)
-        route = request.scope.get("route")
-        route_template = getattr(route, "path", "unmatched")
+        route_template = resolve_route_template(request.scope, ROUTE_TEMPLATES)
         span.set_attribute("http.request.method", request.method)
         span.set_attribute("http.route", route_template)
         span.set_attribute("http.response.status_code", response.status_code)
@@ -126,15 +123,13 @@ async def request_context_middleware(request: Request, call_next):
             duration_ms=duration_ms,
         )
         response.headers["x-request-id"] = request_id
-        logger.info(
+        lifecycle_event(
+            logger,
             "request_completed",
-            extra={
-                "request_id": request_id,
-                "method": request.method,
-                "path": route_template,
-                "status_code": response.status_code,
-                "duration_ms": duration_ms,
-            },
+            method=request.method,
+            route=route_template,
+            status_code=response.status_code,
+            duration_ms=duration_ms,
         )
         return response
 
@@ -173,7 +168,7 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
 @app.exception_handler(Exception)
 async def unhandled_exception_handler(request: Request, exc: Exception):
     request_id = getattr(request.state, "request_id", "unknown")
-    logger.exception("unhandled_exception", extra={"request_id": request_id})
+    lifecycle_event(logger, "unhandled_exception", level=logging.ERROR)
     return error_response(
         code="INTERNAL_SERVER_ERROR",
         message="An unexpected error occurred",
@@ -228,3 +223,6 @@ app.include_router(
 @app.get("/")
 async def root():
     return {"message": "Meridian RAG API", "version": "0.1.0"}
+
+
+ROUTE_TEMPLATES = build_route_template_registry(app.routes)

@@ -6,7 +6,7 @@
    private Grafana Alloy host service. Use the deployment secret manager for all
    `GRAFANA_CLOUD_*` values.
 2. Set `OBSERVABILITY_ENABLED=true` for every Meridian process and point its
-   OTLP trace/metric endpoints at Alloy (`http://127.0.0.1:4318/v1/...`).
+   OTLP trace/metric/log endpoints at Alloy (`http://127.0.0.1:4318/v1/...`).
    Alloy's separate health/debug endpoint is `http://127.0.0.1:12345` and is
    not an OTLP destination. Do not set `OTEL_EXPORTER_OTLP_HEADERS`,
    `OTEL_EXPORTER_OTLP_ENDPOINT`, or any `GRAFANA_CLOUD_*` value in Meridian's
@@ -18,13 +18,19 @@
 
 1. Use `GET /health`; expect `200` with healthy dependency status. Confirm an
    API request metric and a route-template trace, with no request body/headers.
-2. Use the document upload endpoint with the disposable evaluation fixture;
+   In Loki query `{service_name="meridian-api"}` and confirm the safe
+   `request_completed` event has trace correlation but no request ID.
+2. Use `GET /api/v1/documents?limit=10&offset=0` through Swagger/BFF (an
+   unauthenticated request may return `401`). In Mimir, confirm the
+   `meridian_http_requests_total` route label is `/api/v1/documents`, not an
+   empty string, UUID, or query string.
+3. Use the document upload endpoint with the disposable evaluation fixture;
    expect its documented success response. Confirm an ingestion heartbeat,
    queue-age observation, and completion or bounded failure-class metric.
-3. Use the chat endpoint with an evaluation question; expect its documented SSE
+4. Use the chat endpoint with an evaluation question; expect its documented SSE
    response. Confirm dense/lexical, lifecycle-hydration, and evidence-selection
    observations without the question, citation text, document id, or filename.
-4. In Grafana, open **Meridian operational overview** and confirm API RED,
+5. In Grafana, open the persisted **Meridian operational overview** and confirm API RED,
    worker, dependency, and RAG-stage panels receive series.
 
 ## Negative checks
@@ -41,6 +47,6 @@
 
 - [ ] API, ingestion, and purge telemetry reach the intended Grafana Cloud stack.
 - [ ] Dashboard panels and alert routing were verified with a controlled failure.
-- [ ] Trace/log correlation is present, without prohibited fields.
+- [ ] Trace/log correlation is present, without prohibited fields or request IDs.
 - [ ] Synthetic API and worker-heartbeat monitors pass from the target region.
 - [ ] Baseline SLO thresholds and on-call destinations have explicit owners.
