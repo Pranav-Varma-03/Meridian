@@ -1,5 +1,6 @@
 import json
 import logging
+import time
 import uuid
 from collections.abc import AsyncIterator
 from datetime import datetime
@@ -14,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.auth import get_current_user
 from app.core.config import get_settings
 from app.core.database import get_db_session
-from app.core.observability import lifecycle_event
+from app.core.observability import lifecycle_event, record_rag_stage_observation
 from app.core.rate_limits import require_rate_limit
 from app.models.entities import MessageRole, RetrievalScopeMode, User
 from app.schemas import (
@@ -359,6 +360,7 @@ async def chat(
         AsyncOpenAI(
             api_key=settings.openrouter_api_key,
             base_url=settings.openrouter_base_url,
+            timeout=settings.generation_provider_timeout_seconds,
         )
         if settings.openrouter_api_key
         else None
@@ -435,6 +437,7 @@ async def chat(
     )
 
     async def generate() -> AsyncIterator[str]:
+        stream_started = time.perf_counter()
         done_event = {
             "type": "done",
             "conversation_id": str(conversation.id),
@@ -457,6 +460,11 @@ async def chat(
             yield _sse({"type": "text", "content": answer})
             yield _sse({"type": "sources", "content": []})
             yield _sse(done_event)
+            record_rag_stage_observation(
+                stage="sse_completion",
+                outcome="insufficient_context",
+                duration_ms=(time.perf_counter() - stream_started) * 1000,
+            )
             return
 
         answer_parts: list[str] = []
@@ -478,6 +486,11 @@ async def chat(
                 }
             )
             yield _sse(done_event)
+            record_rag_stage_observation(
+                stage="sse_completion",
+                outcome="generation_failure",
+                duration_ms=(time.perf_counter() - stream_started) * 1000,
+            )
             return
 
         answer = "".join(answer_parts).strip()
@@ -486,6 +499,11 @@ async def chat(
                 {"type": "error", "message": "Chat generation returned no answer"}
             )
             yield _sse(done_event)
+            record_rag_stage_observation(
+                stage="sse_completion",
+                outcome="empty_response",
+                duration_ms=(time.perf_counter() - stream_started) * 1000,
+            )
             return
         await conversations.add_message(
             session,
@@ -512,6 +530,11 @@ async def chat(
         )
         yield _sse({"type": "sources", "content": normalized_sources})
         yield _sse(done_event)
+        record_rag_stage_observation(
+            stage="sse_completion",
+            outcome="success",
+            duration_ms=(time.perf_counter() - stream_started) * 1000,
+        )
 
     return StreamingResponse(
         generate(),

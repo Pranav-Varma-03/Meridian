@@ -176,6 +176,7 @@ async def test_chat_builds_openrouter_client_for_generation(
         assert kwargs["client"].kwargs == {
             "api_key": "test-openrouter-key",
             "base_url": "https://openrouter.ai/api/v1",
+            "timeout": 60.0,
         }
         yield "Approval is required."
 

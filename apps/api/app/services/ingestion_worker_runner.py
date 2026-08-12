@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import time
 
 import redis.asyncio as redis
 from openai import AsyncOpenAI
@@ -16,6 +17,7 @@ from app.core.observability import (
     lifecycle_event,
     record_ingestion_outcome,
     record_ingestion_prepared,
+    record_rag_stage_observation,
     record_worker_heartbeat,
     retrieval_event,
     shutdown_observability,
@@ -133,23 +135,32 @@ async def default_ingestion_processor(
         )
     )
     strategy_version = "legacy_character_v1"
+    active_rag_stage = "parsing"
     try:
         if is_structured:
             configuration = generation.configuration_json
             parser = configuration["parser"]
             chunker = configuration["chunker"]
             strategy_version = chunker["strategy"]
+            parsing_started = time.perf_counter()
             elements = document_parsing.parse_document(
                 storage_path=storage_path,
                 mime_type=claimed_job.document.mime_type,
                 provider=parser["provider"],
                 allow_compatibility_fallback=True,
             )
+            record_rag_stage_observation(
+                stage="parsing",
+                outcome="success",
+                duration_ms=(time.perf_counter() - parsing_started) * 1000,
+            )
             if not elements:
                 raise ingestion_worker.NonRetryableIngestionError(
                     "No extractable text found in document"
                 )
             tokenizer = tokenization.get_tokenizer(configuration["tokenizer"]["name"])
+            active_rag_stage = "chunking"
+            chunking_started = time.perf_counter()
             children = structured_chunking.build_structure_aware_children(
                 elements=elements,
                 tokenizer=tokenizer,
@@ -163,6 +174,11 @@ async def default_ingestion_processor(
                 tokenizer=tokenizer,
                 parent_target_tokens=chunker["parent_target_tokens"],
                 parent_max_tokens=chunker["parent_max_tokens"],
+            )
+            record_rag_stage_observation(
+                stage="chunking",
+                outcome="success",
+                duration_ms=(time.perf_counter() - chunking_started) * 1000,
             )
             if not children or not parents:
                 raise ingestion_worker.NonRetryableIngestionError(
@@ -195,20 +211,34 @@ async def default_ingestion_processor(
                 child_count=len(children),
                 parent_count=len(parents),
                 child_token_total=sum(child.token_count for child in children),
+                child_overlap_tokens=chunker["child_overlap_tokens"],
             )
             document_text = "\n\n".join(element.text for element in elements)
         else:
+            parsing_started = time.perf_counter()
             segments = document_processor.extract_text_segments(
                 storage_path=storage_path,
                 mime_type=claimed_job.document.mime_type,
+            )
+            record_rag_stage_observation(
+                stage="parsing",
+                outcome="success",
+                duration_ms=(time.perf_counter() - parsing_started) * 1000,
             )
             if not segments:
                 raise ingestion_worker.NonRetryableIngestionError(
                     "No extractable text found in document"
                 )
+            active_rag_stage = "chunking"
+            chunking_started = time.perf_counter()
             chunks = document_processor.build_chunks(
                 segments=segments,
                 source_file=claimed_job.document.filename,
+            )
+            record_rag_stage_observation(
+                stage="chunking",
+                outcome="success",
+                duration_ms=(time.perf_counter() - chunking_started) * 1000,
             )
             if not chunks:
                 raise ingestion_worker.NonRetryableIngestionError(
@@ -241,6 +271,11 @@ async def default_ingestion_processor(
         OSError,
         ValueError,
     ) as exc:
+        record_rag_stage_observation(
+            stage=active_rag_stage,
+            outcome="failure",
+            duration_ms=0,
+        )
         record_ingestion_outcome(
             outcome="failed",
             strategy_version=strategy_version,

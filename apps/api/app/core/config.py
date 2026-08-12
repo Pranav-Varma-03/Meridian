@@ -85,6 +85,7 @@ class Settings(BaseSettings):
     chat_model: str = "openrouter/free"
     chat_temperature: float = Field(default=0.2, ge=0, le=2)
     chat_max_output_tokens: int = Field(default=800, gt=0, le=8192)
+    generation_provider_timeout_seconds: float = Field(default=60.0, gt=0, le=300)
     chat_context_window_tokens: int = Field(default=16000, gt=1024, le=200000)
     chat_context_budget_tokens: int = Field(default=6000, gt=256, le=100000)
     chat_safety_reserve_tokens: int = Field(default=512, gt=0, le=8192)
@@ -142,6 +143,7 @@ class Settings(BaseSettings):
     pinecone_index_name: str
     pinecone_vector_delete_batch_size: int = Field(default=100, gt=0, le=1000)
     pinecone_vector_delete_timeout_seconds: float = Field(default=5.0, gt=0)
+    pinecone_query_timeout_seconds: float = Field(default=10.0, gt=0, le=120)
     pinecone_vector_delete_max_attempts: int = Field(default=3, gt=0, le=10)
 
     # Auth0

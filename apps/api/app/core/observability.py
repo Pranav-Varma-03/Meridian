@@ -105,12 +105,49 @@ RETRIEVAL_OPERATIONAL_THRESHOLDS = {
     "p95_latency_regression": 0.30,
 }
 
+# Stages are metric labels and must stay a fixed, reviewable vocabulary.  Keep
+# ingestion and chat completion in the same family as retrieval so operators
+# can compare the end-to-end RAG path without admitting caller-provided labels.
+RAG_STAGE_VOCABULARY = frozenset(
+    {
+        "parsing",
+        "chunking",
+        "embedding",
+        "indexing",
+        "activation",
+        "dense",
+        "lexical",
+        "fusion",
+        "lifecycle_hydration",
+        "expansion",
+        "reranking",
+        "evidence_selection",
+        "sse_completion",
+        "unknown",
+    }
+)
+RAG_STAGE_OUTCOMES = frozenset(
+    {
+        "success",
+        "failure",
+        "validation_failure",
+        "degraded",
+        "insufficient_context",
+        "generation_failure",
+        "empty_response",
+        "unknown",
+    }
+)
+
 _meter = metrics.get_meter("meridian.retrieval")
 _ingestion_generations = _meter.create_counter("meridian.ingestion.generations")
 _ingestion_elements = _meter.create_histogram("meridian.ingestion.elements")
 _ingestion_children = _meter.create_histogram("meridian.ingestion.children")
 _ingestion_parents = _meter.create_histogram("meridian.ingestion.parents")
 _ingestion_child_tokens = _meter.create_histogram("meridian.ingestion.child_tokens")
+_ingestion_child_overlap_tokens = _meter.create_histogram(
+    "meridian.ingestion.child_overlap_tokens"
+)
 _retrieval_requests = _meter.create_counter("meridian.retrieval.requests")
 _retrieval_candidates = _meter.create_histogram("meridian.retrieval.candidates")
 _retrieval_latency = _meter.create_histogram("meridian.retrieval.latency_ms")
@@ -123,6 +160,9 @@ _rag_stage_latency = _meter.create_histogram("meridian.rag.stage.duration_ms")
 _rag_stage_operations = _meter.create_counter("meridian.rag.stage.operations")
 _dependency_operations = _meter.create_counter("meridian.dependency.operations")
 _dependency_latency = _meter.create_histogram("meridian.dependency.duration_ms")
+_database_pool_connections = _meter.create_histogram(
+    "meridian.database.pool.connections"
+)
 
 _INGESTION_FAILURE_CLASSES = {
     "parser",
@@ -379,10 +419,28 @@ def record_worker_job_observation(
 def record_rag_stage_observation(
     *, stage: str, outcome: str, duration_ms: float, degraded: bool = False
 ) -> None:
-    """Record an internal RAG stage using a fixed stage vocabulary only."""
-    attributes = {"stage": stage, "outcome": outcome, "degraded": degraded}
+    """Record a bounded RAG stage in both metrics and the active trace."""
+    attributes = {
+        "stage": normalize_rag_stage(stage),
+        "outcome": normalize_rag_stage_outcome(outcome),
+        "degraded": degraded,
+    }
     _rag_stage_operations.add(1, attributes)
-    _rag_stage_latency.record(max(duration_ms, 0), attributes)
+    safe_duration_ms = max(duration_ms, 0)
+    _rag_stage_latency.record(safe_duration_ms, attributes)
+    trace.get_current_span().add_event(
+        "rag.stage", {**attributes, "duration_ms": safe_duration_ms}
+    )
+
+
+def normalize_rag_stage(stage: str) -> str:
+    """Return a bounded RAG-stage metric label for an internal stage name."""
+    return stage if stage in RAG_STAGE_VOCABULARY else "unknown"
+
+
+def normalize_rag_stage_outcome(outcome: str) -> str:
+    """Return a bounded RAG-stage outcome label."""
+    return outcome if outcome in RAG_STAGE_OUTCOMES else "unknown"
 
 
 def record_dependency_observation(
@@ -392,6 +450,31 @@ def record_dependency_observation(
     attributes = {"dependency": dependency, "outcome": outcome}
     _dependency_operations.add(1, attributes)
     _dependency_latency.record(duration_ms, attributes)
+
+
+def record_database_pool_observation(engine: Any) -> None:
+    """Sample bounded SQLAlchemy pool capacity without emitting connection IDs."""
+    pool = getattr(getattr(engine, "sync_engine", engine), "pool", None)
+    if pool is None and all(
+        callable(getattr(engine, method_name, None))
+        for method_name in ("size", "checkedout", "overflow")
+    ):
+        pool = engine
+    if pool is None:
+        return
+    for state, method_name in (
+        ("size", "size"),
+        ("checked_out", "checkedout"),
+        ("overflow", "overflow"),
+    ):
+        method = getattr(pool, method_name, None)
+        if not callable(method):
+            continue
+        try:
+            _database_pool_connections.record(max(int(method()), 0), {"state": state})
+        except Exception:
+            # Pool introspection is operational telemetry only and must fail open.
+            continue
 
 
 class DependencySpan:
@@ -435,6 +518,7 @@ def record_ingestion_prepared(
     child_count: int,
     parent_count: int,
     child_token_total: int,
+    child_overlap_tokens: int,
 ) -> None:
     """Record bounded structured-ingestion observations without document data."""
     attributes = {
@@ -446,6 +530,7 @@ def record_ingestion_prepared(
     _ingestion_children.record(child_count, attributes)
     _ingestion_parents.record(parent_count, attributes)
     _ingestion_child_tokens.record(child_token_total, attributes)
+    _ingestion_child_overlap_tokens.record(max(child_overlap_tokens, 0), attributes)
 
 
 def record_ingestion_outcome(
@@ -473,6 +558,9 @@ def record_retrieval_observation(
     lexical_count: int,
     fusion_overlap: int,
     selected_count: int,
+    lifecycle_excluded_count: int,
+    expansion_added_count: int,
+    reranking_count: int,
     qualifying_count: int,
     degraded: bool,
     total_latency_ms: float,
@@ -485,6 +573,9 @@ def record_retrieval_observation(
         "lexical": lexical_count,
         "fusion_overlap": fusion_overlap,
         "selected": selected_count,
+        "lifecycle_excluded": lifecycle_excluded_count,
+        "expansion_added": expansion_added_count,
+        "reranking": reranking_count,
         "qualifying": qualifying_count,
     }.items():
         _retrieval_candidates.record(value, {**attributes, "channel": channel})

@@ -8,6 +8,7 @@ from pydantic import BaseModel, ConfigDict
 from sqlalchemy import text
 
 from app.core.config import get_settings
+from app.core.observability import DependencySpan, record_database_pool_observation
 from app.schemas import INTERNAL_ERROR_RESPONSE
 
 router = APIRouter()
@@ -79,7 +80,11 @@ def _timestamp() -> str:
 async def _database_status(request: Request) -> str:
     try:
         async with request.app.state.db_session_factory() as session:
-            await session.execute(text("SELECT 1"))
+            with DependencySpan("postgres", "readiness_probe"):
+                await session.execute(text("SELECT 1"))
+            get_bind = getattr(session, "get_bind", None)
+            if callable(get_bind):
+                record_database_pool_observation(get_bind())
     except Exception:
         return "unhealthy"
     return "healthy"
@@ -87,7 +92,8 @@ async def _database_status(request: Request) -> str:
 
 async def _redis_status(request: Request) -> str:
     try:
-        await request.app.state.redis.ping()
+        with DependencySpan("redis", "readiness_probe"):
+            await request.app.state.redis.ping()
     except Exception:
         return "unhealthy"
     return "healthy"
@@ -99,7 +105,8 @@ async def _pinecone_status(request: Request) -> str:
         return "unhealthy"
     try:
         # This validates credentials and index visibility without reading vectors.
-        await asyncio.to_thread(client.describe_index, settings.pinecone_index_name)
+        with DependencySpan("pinecone", "readiness_probe"):
+            await asyncio.to_thread(client.describe_index, settings.pinecone_index_name)
     except Exception:
         return "unhealthy"
     return "healthy"

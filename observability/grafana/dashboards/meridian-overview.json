@@ -1,4 +1,30 @@
 {
+  "__inputs": [
+    {
+      "name": "DS_PROMETHEUS",
+      "label": "Prometheus",
+      "description": "Meridian metrics datasource",
+      "type": "datasource",
+      "pluginId": "prometheus",
+      "pluginName": "Prometheus"
+    },
+    {
+      "name": "DS_LOKI",
+      "label": "Loki",
+      "description": "Meridian application logs datasource",
+      "type": "datasource",
+      "pluginId": "loki",
+      "pluginName": "Loki"
+    },
+    {
+      "name": "DS_TEMPO",
+      "label": "Tempo",
+      "description": "Meridian traces datasource",
+      "type": "datasource",
+      "pluginId": "tempo",
+      "pluginName": "Tempo"
+    }
+  ],
   "annotations": {"list": [{"builtIn": 1, "type": "dashboard"}]},
   "editable": true,
   "panels": [
@@ -91,6 +117,30 @@
       "targets": [{"expr": "sum by (mode, degraded) (rate(meridian_retrieval_requests_total[5m]))", "refId": "A"}],
       "title": "Retrieval rollout comparison",
       "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 58},
+      "id": 12,
+      "targets": [{"expr": "max by (state) (meridian_database_pool_connections)", "refId": "A"}],
+      "title": "Database pool capacity and saturation",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 58},
+      "id": 13,
+      "targets": [{"expr": "sum by (__name__) (count({__name__=~\"meridian_.*\"}))", "refId": "A"}],
+      "title": "Meridian active-series proxy",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "tempo", "uid": "${DS_TEMPO}"},
+      "gridPos": {"h": 10, "w": 24, "x": 0, "y": 66},
+      "id": 14,
+      "targets": [{"queryType": "traceql", "query": "{ resource.service.name = \"meridian-api\" }", "refId": "A"}],
+      "title": "Recent Meridian traces",
+      "type": "traces"
     }
   ],
   "schemaVersion": 39,
@@ -99,5 +149,5 @@
   "time": {"from": "now-6h", "to": "now"},
   "title": "Meridian operational overview",
   "uid": "meridian-overview",
-  "version": 2
+  "version": 4
 }

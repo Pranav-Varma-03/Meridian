@@ -19,7 +19,7 @@ The repository is currently set up for:
 - Authenticated document upload/list/detail/delete APIs
 - Redis-backed ingestion job queue
 - Background ingestion worker
-- Document parsing + semantic chunk persistence
+- Versioned structured parsing and token-aware child/parent chunk persistence
 - Embedding generation through a provider-driven embedding layer
 - Pinecone vector upsert per user namespace
 - User-scoped document deduplication across collections
@@ -30,11 +30,17 @@ Current ingestion flow:
 2. API creates the `documents` row and an `ingestion_jobs` row
 3. Job is pushed to Redis (`INGESTION_QUEUE_KEY`)
 4. Worker dequeues the job and parses/chunks the document
-5. Chunks are semantically split using paragraph/sentence/clause-aware chunking with overlap
-6. Optional contextual chunk enrichment can be applied before embedding
-7. Vectors are upserted to Pinecone under namespace `user:<user_id>`
-8. `vector_id` is persisted on each chunk row
-9. Job/document move to `ready` on success, or `failed` on error
+5. The worker stores immutable exact child evidence and bounded parent windows;
+   children preserve section/page locators and deterministic same-section overlap.
+6. A separate deterministic `embedding_text` adds only document-derived title,
+   section, and locator context. It never replaces exact source evidence.
+7. Children receive lexical PostgreSQL state and dense vectors in Pinecone under
+   namespace `user:<user_id>`.
+8. The pending generation activates atomically only after parents, children,
+   lexical state, vectors, and manifests are complete. The prior generation
+   remains retrievable until then.
+9. Superseded vector state is purged asynchronously; Postgres remains the
+   authoritative owner, lifecycle, exact-evidence, and citation store.
 
 ## Local setup
 
@@ -157,6 +163,8 @@ OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
 CHAT_MODEL=openrouter/free
 CHAT_TEMPERATURE=0.2
 CHAT_MAX_OUTPUT_TOKENS=800
+GENERATION_PROVIDER_TIMEOUT_SECONDS=60
+PINECONE_QUERY_TIMEOUT_SECONDS=10
 CHAT_CONTEXT_BUDGET_TOKENS=6000
 CHAT_CONTEXT_WINDOW_TOKENS=16000
 CHAT_SAFETY_RESERVE_TOKENS=512
@@ -213,35 +221,29 @@ synthetic `all`, version `0`. A submitted scope change is stored with the first 
 user-message sequence for timeline display, while the latest scope is restored from one
 current-scope row.
 
-### 3.3) Contextual chunking options
+### 3.3) Structured ingestion and grounded hybrid retrieval
 
-The ingestion pipeline now supports three chunking/enrichment modes:
+New generations use `structure_aware_parent_child_v1`: 384-token child target,
+512-token child maximum, 48-token same-section overlap, 900-token parent target,
+and 1200-token parent maximum. Parser, tokenizer, chunker, embedding-text,
+lexical, dense-index, fusion, reranker, and prompt-policy versions are persisted
+on every ingestion generation.
 
-1. **Base semantic chunking**
-   - paragraph / sentence / clause aware splitting
-   - overlap preserved between merged semantic units
+`chunk_text` remains immutable exact document evidence. `embedding_text` is a
+separate, deterministic retrieval input constructed from document-derived title,
+section path, page range, and exact child text. Experimental generated context is
+stored separately and never reaches prompt evidence or citations.
 
-2. **Native contextual chunking**
-   - enable with:
+Retrieval remains `dense` by default. `hybrid_shadow` evaluates PostgreSQL lexical
+results and weighted reciprocal-rank fusion (`rrf_k=60`) without changing answers;
+`hybrid` uses fused lifecycle-valid children. Expansion and reranking stay feature
+gated. PostgreSQL full-text search is lexical retrieval, not BM25.
 
-   ```env
-   CONTEXTUAL_EMBEDDING_ENABLED=true
-   CONTEXTUAL_CHUNKING_PROVIDER=native
-   ```
-
-   This uses document-local leading/trailing context to enrich chunk text before embedding.
-
-3. **LLM contextual chunking**
-   - enable with:
-
-   ```env
-   CONTEXTUAL_EMBEDDING_ENABLED=true
-   CONTEXTUAL_CHUNKING_PROVIDER=openai
-   CONTEXTUAL_CHUNKING_MODEL=gpt-4o-mini
-   OPENAI_API_KEY=<your-openai-api-key>
-   ```
-
-   This asks an LLM to generate a short retrieval-oriented context for each chunk before embedding.
+Every answer is source-only: Pinecone metadata is limited to identifiers and
+filters, Postgres hydrates exact active-generation evidence, and no qualifying
+evidence returns a deterministic insufficiency answer without a provider call.
+See [the grounded retrieval Swagger guide](ManualTestGuide/Grounded_Retrieval_Swagger_Guide.md)
+for rollout and verification steps.
 
 ### 4) Auth0 quick setup for local development
 

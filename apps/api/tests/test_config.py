@@ -22,6 +22,8 @@ def test_settings_load_with_required_env(monkeypatch: pytest.MonkeyPatch) -> Non
     ]
     assert settings.chat_model == "openrouter/free"
     assert settings.openrouter_base_url == "https://openrouter.ai/api/v1"
+    assert settings.generation_provider_timeout_seconds == 60.0
+    assert settings.pinecone_query_timeout_seconds == 10.0
 
 
 def test_settings_normalizes_openrouter_base_url(
@@ -81,6 +83,10 @@ def test_settings_accept_otlp_endpoints_when_observability_is_enabled(
     monkeypatch.setenv(
         "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT",
         "https://collector.example.com/v1/metrics",
+    )
+    monkeypatch.setenv(
+        "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT",
+        "https://collector.example.com/v1/logs",
     )
 
     settings = Settings()

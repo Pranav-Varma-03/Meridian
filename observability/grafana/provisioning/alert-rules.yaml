@@ -5,6 +5,177 @@ groups:
     folder: Meridian
     interval: 1m
     rules:
+      - uid: meridian-dependency-unavailable
+        title: Meridian dependency unavailable
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: {from: 600, to: 0}
+            datasourceUid: prometheus
+            model:
+              expr: sum(rate(meridian_dependency_operations_total{outcome=~"failure|unavailable"}[5m]))
+              refId: A
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              expression: A
+              conditions: [{evaluator: {type: gt, params: [0]}}]
+        for: 5m
+        labels: {service: meridian, severity: critical, owner: platform}
+        annotations: {runbook_url: https://REPLACE_WITH_INTERNAL_RUNBOOK/meridian-dependencies, dashboard_uid: meridian-overview}
+      - uid: meridian-queue-backlog
+        title: Meridian queue backlog
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: {from: 600, to: 0}
+            datasourceUid: prometheus
+            model:
+              expr: histogram_quantile(0.95, sum by (le) (rate(meridian_worker_queue_age_ms_bucket[10m])))
+              refId: A
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              expression: A
+              conditions: [{evaluator: {type: gt, params: [300000]}}]
+        for: 10m
+        labels: {service: meridian, severity: warning, owner: platform}
+        annotations: {runbook_url: https://REPLACE_WITH_INTERNAL_RUNBOOK/meridian-workers, dashboard_uid: meridian-overview}
+      - uid: meridian-parser-failures
+        title: Meridian parser failures
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: {from: 900, to: 0}
+            datasourceUid: prometheus
+            model:
+              expr: sum(rate(meridian_ingestion_generations_total{outcome="failed",failure_class="parser"}[15m])) / clamp_min(sum(rate(meridian_ingestion_generations_total[15m])), 1)
+              refId: A
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              expression: A
+              conditions: [{evaluator: {type: gt, params: [0.02]}}]
+        for: 15m
+        labels: {service: meridian, severity: warning, owner: platform}
+        annotations: {runbook_url: https://REPLACE_WITH_INTERNAL_RUNBOOK/meridian-ingestion, dashboard_uid: meridian-overview}
+      - uid: meridian-generation-activation-failures
+        title: Meridian generation activation failures
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: {from: 600, to: 0}
+            datasourceUid: prometheus
+            model:
+              expr: sum(rate(meridian_ingestion_generations_total{outcome="failed",failure_class="activation"}[10m])) / clamp_min(sum(rate(meridian_ingestion_generations_total[10m])), 1)
+              refId: A
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              expression: A
+              conditions: [{evaluator: {type: gt, params: [0.01]}}]
+        for: 10m
+        labels: {service: meridian, severity: critical, owner: platform}
+        annotations: {runbook_url: https://REPLACE_WITH_INTERNAL_RUNBOOK/meridian-generations, dashboard_uid: meridian-overview}
+      - uid: meridian-lexical-retrieval-degradation
+        title: Meridian lexical retrieval degradation
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: {from: 600, to: 0}
+            datasourceUid: prometheus
+            model:
+              expr: sum(rate(meridian_rag_stage_operations_total{stage="lexical",outcome=~"failure|degraded"}[10m])) / clamp_min(sum(rate(meridian_rag_stage_operations_total{stage="lexical"}[10m])), 1)
+              refId: A
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              expression: A
+              conditions: [{evaluator: {type: gt, params: [0.02]}}]
+        for: 10m
+        labels: {service: meridian, severity: warning, owner: platform}
+        annotations: {runbook_url: https://REPLACE_WITH_INTERNAL_RUNBOOK/meridian-retrieval, dashboard_uid: meridian-overview}
+      - uid: meridian-hybrid-retrieval-degradation
+        title: Meridian hybrid retrieval degradation
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: {from: 600, to: 0}
+            datasourceUid: prometheus
+            model:
+              expr: sum(rate(meridian_retrieval_requests_total{mode=~"hybrid|hybrid_shadow",degraded="true"}[10m])) / clamp_min(sum(rate(meridian_retrieval_requests_total{mode=~"hybrid|hybrid_shadow"}[10m])), 1)
+              refId: A
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              expression: A
+              conditions: [{evaluator: {type: gt, params: [0.01]}}]
+        for: 10m
+        labels: {service: meridian, severity: warning, owner: platform}
+        annotations: {runbook_url: https://REPLACE_WITH_INTERNAL_RUNBOOK/meridian-retrieval, dashboard_uid: meridian-overview}
+      - uid: meridian-retrieval-empty-shift
+        title: Meridian retrieval empty shift
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: {from: 1800, to: 0}
+            datasourceUid: prometheus
+            model:
+              expr: sum(rate(meridian_retrieval_candidates_count{channel="qualifying"}[30m]))
+              refId: A
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              expression: A
+              conditions: [{evaluator: {type: lt, params: [1]}}]
+        for: 30m
+        labels: {service: meridian, severity: warning, owner: platform}
+        annotations: {runbook_url: https://REPLACE_WITH_INTERNAL_RUNBOOK/meridian-retrieval, dashboard_uid: meridian-overview}
+      - uid: meridian-api-p95-latency-regression
+        title: Meridian API p95 latency regression
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: {from: 900, to: 0}
+            datasourceUid: prometheus
+            model:
+              expr: histogram_quantile(0.95, sum by (le) (rate(meridian_http_server_duration_ms_bucket[15m])))
+              refId: A
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              expression: A
+              conditions: [{evaluator: {type: gt, params: [1000]}}]
+        for: 15m
+        labels: {service: meridian, severity: warning, owner: platform}
+        annotations: {runbook_url: https://REPLACE_WITH_INTERNAL_RUNBOOK/meridian-api, dashboard_uid: meridian-overview}
+      - uid: meridian-alloy-export-failures
+        title: Meridian Alloy export failures
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: {from: 600, to: 0}
+            datasourceUid: prometheus
+            model:
+              expr: sum(rate(otelcol_exporter_send_failed_log_records_total[5m])) + sum(rate(otelcol_exporter_send_failed_metric_points_total[5m])) + sum(rate(otelcol_exporter_send_failed_spans_total[5m]))
+              refId: A
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              expression: A
+              conditions: [{evaluator: {type: gt, params: [0]}}]
+        for: 5m
+        labels: {service: meridian, severity: critical, owner: platform}
+        annotations: {runbook_url: https://REPLACE_WITH_INTERNAL_RUNBOOK/meridian-alloy, dashboard_uid: meridian-overview}
       - uid: meridian-worker-heartbeat-missing
         title: Meridian worker heartbeat missing
         condition: C

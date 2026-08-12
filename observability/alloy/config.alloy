@@ -64,6 +64,16 @@ otelcol.processor.attributes "safety" {
 	}
 
 	action {
+		key    = "generation_id"
+		action = "delete"
+	}
+
+	action {
+		key    = "request_id"
+		action = "delete"
+	}
+
+	action {
 		key    = "query"
 		action = "delete"
 	}
@@ -86,6 +96,75 @@ otelcol.processor.attributes "safety" {
 	action {
 		key    = "authorization"
 		action = "delete"
+	}
+
+	action {
+		key    = "token"
+		action = "delete"
+	}
+
+	action {
+		key    = "secret"
+		action = "delete"
+	}
+
+	action {
+		key    = "password"
+		action = "delete"
+	}
+
+	action {
+		key    = "api_key"
+		action = "delete"
+	}
+
+	action {
+		key    = "source_text"
+		action = "delete"
+	}
+
+	action {
+		key    = "derived_context"
+		action = "delete"
+	}
+
+	action {
+		key    = "provider_response"
+		action = "delete"
+	}
+
+	action {
+		key    = "raw_payload"
+		action = "delete"
+	}
+
+	action {
+		key    = "vector"
+		action = "delete"
+	}
+
+	action {
+		key    = "embedding"
+		action = "delete"
+	}
+
+	output {
+		metrics = [otelcol.processor.filter.safety.input]
+		traces  = [otelcol.processor.filter.safety.input]
+		logs    = [otelcol.processor.filter.safety.input]
+	}
+}
+
+// Reject over-sized log records before batching. The application bridge emits a
+// short event name only; this is a second barrier against accidental payload
+// export and keeps Loki ingestion bounded.
+otelcol.processor.filter "safety" {
+	error_mode = "ignore"
+
+	logs {
+		log_record = [
+			`Len(body) > 512`,
+		]
 	}
 
 	output {

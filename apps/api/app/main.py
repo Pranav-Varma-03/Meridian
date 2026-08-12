@@ -70,7 +70,12 @@ async def lifespan(app: FastAPI):
 
     await init_db()
 
-    app.state.redis = redis.from_url(settings.redis_url, decode_responses=True)
+    app.state.redis = redis.from_url(
+        settings.redis_url,
+        decode_responses=True,
+        socket_connect_timeout=5,
+        socket_timeout=5,
+    )
     with DependencySpan("redis", "startup_ping"):
         await app.state.redis.ping()
 

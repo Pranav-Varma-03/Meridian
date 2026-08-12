@@ -420,13 +420,17 @@ async def retrieve_sources(
             }
         index = pinecone_client.Index(settings.pinecone_index_name)
         with DependencySpan("pinecone", "query"):
-            response = await asyncio.to_thread(
-                index.query,
-                vector=vector,
-                top_k=settings.chat_retrieval_top_k * settings.chat_retrieval_overfetch,
-                namespace=embeddings.build_pinecone_namespace(user_id=user_id),
-                include_metadata=True,
-                filter=metadata_filter,
+            response = await asyncio.wait_for(
+                asyncio.to_thread(
+                    index.query,
+                    vector=vector,
+                    top_k=settings.chat_retrieval_top_k
+                    * settings.chat_retrieval_overfetch,
+                    namespace=embeddings.build_pinecone_namespace(user_id=user_id),
+                    include_metadata=True,
+                    filter=metadata_filter,
+                ),
+                timeout=settings.pinecone_query_timeout_seconds,
             )
     except ValueError:
         record_rag_stage_observation(
@@ -524,6 +528,7 @@ async def retrieve_sources(
         user_id=user_id,
         candidates=selected_candidates,
     )
+    lifecycle_excluded_count = max(len(selected_candidates) - len(normalized), 0)
     record_rag_stage_observation(
         stage="lifecycle_hydration",
         outcome="success",
@@ -531,6 +536,7 @@ async def retrieve_sources(
     )
     if settings.retrieval_expansion_enabled:
         expansion_started = time.perf_counter()
+        source_count_before_expansion = len(normalized)
         normalized = await _expand_lifecycle_valid_sources(
             session,
             user_id=user_id,
@@ -542,6 +548,9 @@ async def retrieve_sources(
             outcome="success",
             duration_ms=(time.perf_counter() - expansion_started) * 1000,
         )
+        expansion_added_count = max(len(normalized) - source_count_before_expansion, 0)
+    else:
+        expansion_added_count = 0
     qualifying = (
         normalized
         if settings.retrieval_mode == "hybrid"
@@ -553,9 +562,11 @@ async def retrieve_sources(
     )
     qualifying.sort(key=lambda source: source.score, reverse=True)
     qualifying = qualifying[: settings.chat_retrieval_max_sources]
+    reranking_count = 0
     if reranker is not None and (
         settings.reranking_enabled or settings.reranking_shadow_enabled
     ):
+        reranking_count = len(qualifying)
         reranking_started = time.perf_counter()
         try:
             reranked = await apply_reranker(
@@ -594,6 +605,9 @@ async def retrieve_sources(
         lexical_count=len(lexical_candidates),
         fusion_overlap=fusion_overlap,
         selected_count=len(selected_candidates),
+        lifecycle_excluded_count=lifecycle_excluded_count,
+        expansion_added_count=expansion_added_count,
+        reranking_count=reranking_count,
         qualifying_count=len(qualifying),
         degraded=lexical_degraded,
         total_latency_ms=total_latency_ms,

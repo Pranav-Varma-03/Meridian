@@ -8,7 +8,7 @@ from redis.exceptions import RedisError
 
 from app.core.auth import get_current_user
 from app.core.config import get_settings
-from app.core.observability import lifecycle_event
+from app.core.observability import DependencySpan, lifecycle_event
 from app.models.entities import User
 
 logger = logging.getLogger(__name__)
@@ -61,10 +61,11 @@ async def check_rate_limit(*, request: Request, user_id: str, route: str) -> Non
 
     key = f"rate-limit:{route}:{user_id}"
     try:
-        current = await redis_client.incr(key)
-        if current == 1:
-            await redis_client.expire(key, limit.window_seconds)
-        ttl = await redis_client.ttl(key)
+        with DependencySpan("redis", "rate_limit"):
+            current = await redis_client.incr(key)
+            if current == 1:
+                await redis_client.expire(key, limit.window_seconds)
+            ttl = await redis_client.ttl(key)
     except (RedisError, OSError, AttributeError) as exc:
         lifecycle_event(
             logger,

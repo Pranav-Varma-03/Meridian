@@ -11,7 +11,11 @@ from app.core.observability import (
     RETRIEVAL_OPERATIONAL_THRESHOLDS,
     SecretSafeJsonFormatter,
     classify_provider_failure,
+    normalize_rag_stage,
+    normalize_rag_stage_outcome,
+    record_database_pool_observation,
     record_ingestion_outcome,
+    record_ingestion_prepared,
     record_rag_stage_observation,
     record_retrieval_observation,
     record_worker_job_observation,
@@ -85,6 +89,9 @@ def test_retrieval_observations_accept_only_bounded_operational_values() -> None
         lexical_count=8,
         fusion_overlap=4,
         selected_count=16,
+        lifecycle_excluded_count=3,
+        expansion_added_count=2,
+        reranking_count=5,
         qualifying_count=6,
         degraded=False,
         total_latency_ms=42.5,
@@ -109,6 +116,98 @@ def test_worker_and_rag_observations_use_bounded_operational_labels() -> None:
     record_rag_stage_observation(
         stage="lifecycle_hydration", outcome="success", duration_ms=8.4
     )
+
+
+def test_rag_stage_observations_bound_unknown_stage_labels() -> None:
+    """Free-form stage names must not create unbounded metric series."""
+    assert normalize_rag_stage("document-canary-should-not-be-a-label") == "unknown"
+    assert (
+        normalize_rag_stage_outcome("document-canary-should-not-be-a-label")
+        == "unknown"
+    )
+    record_rag_stage_observation(
+        stage="document-canary-should-not-be-a-label",
+        outcome="success",
+        duration_ms=1.0,
+    )
+
+
+def test_rag_stage_observation_adds_a_correlated_trace_event(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[tuple[str, dict[str, object]]] = []
+
+    class _Span:
+        def add_event(self, name: str, attributes: dict[str, object]) -> None:
+            events.append((name, attributes))
+
+    class _Metric:
+        def add(self, *_args, **_kwargs) -> None:
+            return None
+
+        def record(self, *_args, **_kwargs) -> None:
+            return None
+
+    monkeypatch.setattr(
+        observability.trace, "get_current_span", lambda *_args, **_kwargs: _Span()
+    )
+    monkeypatch.setattr(observability, "_rag_stage_operations", _Metric())
+    monkeypatch.setattr(observability, "_rag_stage_latency", _Metric())
+
+    record_rag_stage_observation(stage="dense", outcome="success", duration_ms=12.5)
+
+    assert events == [
+        (
+            "rag.stage",
+            {
+                "stage": "dense",
+                "outcome": "success",
+                "degraded": False,
+                "duration_ms": 12.5,
+            },
+        )
+    ]
+
+
+def test_ingestion_prepared_records_overlap_and_token_distribution_inputs() -> None:
+    record_ingestion_prepared(
+        parser_provider="local",
+        strategy_version="structure_aware_parent_child_v1",
+        element_count=3,
+        child_count=8,
+        parent_count=2,
+        child_token_total=900,
+        child_overlap_tokens=48,
+    )
+
+
+def test_database_pool_sampling_uses_only_bounded_state_labels(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observations: list[tuple[int, dict[str, str]]] = []
+
+    class _Metric:
+        def record(self, value: int, attributes: dict[str, str]) -> None:
+            observations.append((value, attributes))
+
+    class _Pool:
+        def size(self) -> int:
+            return 5
+
+        def checkedout(self) -> int:
+            return 2
+
+        def overflow(self) -> int:
+            return 0
+
+    monkeypatch.setattr(observability, "_database_pool_connections", _Metric())
+    record_database_pool_observation(_Pool())
+
+    assert observations == [
+        (5, {"state": "size"}),
+        (2, {"state": "checked_out"}),
+        (0, {"state": "overflow"}),
+    ]
 
 
 def test_otlp_log_bridge_exports_only_allowlisted_attributes() -> None:

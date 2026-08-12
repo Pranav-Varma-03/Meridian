@@ -8,7 +8,7 @@ Type=simple
 User=meridian
 Group=meridian
 EnvironmentFile=/etc/meridian/grafana-alloy.env
-ExecStart=/usr/local/bin/alloy run /opt/meridian/observability/alloy/config.alloy --server.http.listen-addr=127.0.0.1:12345
+ExecStart=/usr/local/bin/alloy run /opt/meridian/observability/alloy/config.alloy --storage.path=/var/lib/alloy --server.http.listen-addr=127.0.0.1:12345
 Restart=always
 RestartSec=5
 TimeoutStopSec=30

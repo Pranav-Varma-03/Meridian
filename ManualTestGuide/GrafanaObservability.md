@@ -33,6 +33,22 @@
 5. In Grafana, open the persisted **Meridian operational overview** and confirm API RED,
    worker, dependency, and RAG-stage panels receive series.
 
+## Dashboard import and collector fail-open check
+
+1. In Grafana, go to **Dashboards → New → Import**, paste
+   `observability/grafana/dashboards/meridian-overview.json`, and map the three
+   requested inputs to the Meridian Prometheus, Loki, and Tempo data sources.
+   Retain the UID `meridian-overview`. The dashboard is persistent only after
+   **Import** completes; a preview or unsaved draft is not sufficient.
+2. Confirm **API request rate** shows the request just made, **Meridian
+   application logs** shows `{service_name="meridian-api"}`, and **Recent
+   Meridian traces** can find `resource.service.name = "meridian-api"`.
+3. In a non-production host only, record one `/health/ready` response and its
+   elapsed time, stop Alloy using the service manager, then repeat the request.
+   The API response remains `200` while Alloy's service status/export-failure
+   metric becomes unhealthy. Restart Alloy and confirm its ready endpoint
+   returns `200`. Do not perform this step against production traffic.
+
 ## Negative checks
 
 1. Call a protected Swagger endpoint without authorization; expect its existing
