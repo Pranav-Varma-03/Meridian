@@ -43,6 +43,10 @@
 2. Confirm **API request rate** shows the request just made, **Meridian
    application logs** shows `{service_name="meridian-api"}`, and **Recent
    Meridian traces** can find `resource.service.name = "meridian-api"`.
+   Log events must use cataloged names (for example, `request_completed` and
+   `chat_context_selected`) and must not contain `request_id`, bearer tokens,
+   prompts, document text, filenames, or UUID identifiers. See
+   [the structured logging catalog](Structured_Logging_Event_Catalog.md).
 3. In a non-production host only, record one `/health/ready` response and its
    elapsed time, stop Alloy using the service manager, then repeat the request.
    The API response remains `200` while Alloy's service status/export-failure
@@ -58,6 +62,22 @@
 3. Temporarily stop Alloy in non-production. API health and a normal request
    must still complete; Alloy health/export failure must be visible locally and
    no telemetry secret or customer content may be emitted.
+
+## Structured log queries and labels
+
+Use Loki event-body queries such as `{service_name="meridian-api"} |=
+"chat_context_selected"` and `{service_name="meridian-api"} |=
+"unhandled_exception"`. Trace/span identifiers are the cross-signal
+correlation keys; `request_id` is local-only and intentionally absent from
+Loki. Never create Loki labels from user, document, collection, generation,
+job, request, filename, query, token, prompt, content, or exception-message
+values.
+
+Expected event checks are: `auth0_permission_denied` for a 403,
+`chat_context_selected` and `chat_retrieval_completed` for a chat request,
+`ingestion_queue_enqueue_failed`/worker recovery for a controlled queue
+failure, and `unhandled_exception` with a bounded `failure_class` and
+`error_type` for a controlled 500.
 
 ## Completion checklist
 

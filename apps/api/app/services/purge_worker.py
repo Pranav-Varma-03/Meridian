@@ -190,6 +190,8 @@ async def process_purge_job(
             count=len(vector_ids),
             attempts=job.attempts,
             failure_class=classify_provider_failure(exc.__cause__ or exc),
+            error_type=type(exc.__cause__ or exc).__name__,
+            outcome="retryable" if exc.retryable else "terminal_failed",
         )
         record_worker_job_observation(
             worker="purge",
@@ -241,5 +243,6 @@ async def process_purge_job(
         "purge_job_complete",
         count=len(vector_ids),
         attempts=job.attempts,
+        outcome="complete",
     )
     record_worker_job_observation(worker="purge", operation="purge", outcome="complete")

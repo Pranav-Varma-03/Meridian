@@ -18,7 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.auth import get_current_user
 from app.core.config import get_settings
 from app.core.database import get_db_session
-from app.core.observability import lifecycle_event
+from app.core.observability import classify_application_failure, lifecycle_event
 from app.core.rate_limits import require_rate_limit
 from app.models.entities import User
 from app.schemas import (
@@ -242,12 +242,13 @@ async def upload_document(
     if enqueue_job:
         redis_client = getattr(request.app.state, "redis", None)
         if redis_client is None:
-            logger.warning(
-                "Redis client unavailable; ingestion job not pushed to queue",
-                extra={
-                    "job_id": str(result.job.id),
-                    "document_id": str(getattr(result.document, "id", "unknown")),
-                },
+            lifecycle_event(
+                logger,
+                "ingestion_queue_enqueue_failed",
+                level=logging.WARNING,
+                outcome="deferred_to_database_fallback",
+                failure_class="redis",
+                error_type="RedisError",
             )
         else:
             try:
@@ -256,13 +257,14 @@ async def upload_document(
                     queue_key=settings.ingestion_queue_key,
                     job_id=result.job.id,
                 )
-            except Exception:
-                logger.exception(
-                    "Failed to enqueue ingestion job to Redis",
-                    extra={
-                        "job_id": str(result.job.id),
-                        "document_id": str(getattr(result.document, "id", "unknown")),
-                    },
+            except Exception as exc:
+                lifecycle_event(
+                    logger,
+                    "ingestion_queue_enqueue_failed",
+                    level=logging.WARNING,
+                    outcome="deferred_to_database_fallback",
+                    failure_class=classify_application_failure(exc),
+                    error_type=type(exc).__name__,
                 )
 
     lifecycle_event(

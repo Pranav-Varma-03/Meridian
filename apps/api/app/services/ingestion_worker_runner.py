@@ -411,6 +411,7 @@ async def default_ingestion_processor(
         "processing_ingestion_job",
         attempts=claimed_job.job.attempts,
         count=len(persisted_chunks),
+        outcome="ready",
     )
 
 
@@ -430,6 +431,8 @@ async def run_worker_loop() -> None:
             logger,
             "ingestion_queue_startup_unavailable_using_database_fallback",
             level=logging.WARNING,
+            outcome="database_fallback",
+            failure_class="redis",
             error_type=type(exc).__name__,
         )
 
@@ -438,6 +441,7 @@ async def run_worker_loop() -> None:
         "ingestion_worker_started",
         dequeue_timeout_seconds=settings.ingestion_worker_dequeue_timeout_seconds,
         max_attempts=settings.ingestion_worker_max_attempts,
+        outcome="started",
     )
 
     try:
@@ -457,6 +461,7 @@ async def run_worker_loop() -> None:
                         "ingestion_worker_recovered_stuck_jobs",
                         level=logging.WARNING,
                         count=recovered,
+                        outcome="recovered",
                     )
                 processed = await ingestion_worker.process_next_ingestion_job(
                     session,
@@ -474,8 +479,15 @@ async def run_worker_loop() -> None:
     finally:
         try:
             await redis_client.aclose()
-        except RedisError:
-            logger.debug("ingestion_queue_close_failed", exc_info=True)
+        except RedisError as exc:
+            lifecycle_event(
+                logger,
+                "ingestion_queue_close_failed",
+                level=logging.DEBUG,
+                outcome="ignored",
+                failure_class="redis",
+                error_type=type(exc).__name__,
+            )
 
 
 def main() -> None:

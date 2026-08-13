@@ -17,6 +17,7 @@ from app.core.database import AsyncSessionLocal, close_db, init_db
 from app.core.observability import (
     DependencySpan,
     build_route_template_registry,
+    classify_application_failure,
     configure_application_logging,
     initialize_observability,
     lifecycle_event,
@@ -173,7 +174,15 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
 @app.exception_handler(Exception)
 async def unhandled_exception_handler(request: Request, exc: Exception):
     request_id = getattr(request.state, "request_id", "unknown")
-    lifecycle_event(logger, "unhandled_exception", level=logging.ERROR)
+    lifecycle_event(
+        logger,
+        "unhandled_exception",
+        level=logging.ERROR,
+        request_id=request_id,
+        outcome="failed",
+        failure_class=classify_application_failure(exc),
+        error_type=type(exc).__name__,
+    )
     return error_response(
         code="INTERNAL_SERVER_ERROR",
         message="An unexpected error occurred",

@@ -74,7 +74,10 @@ APPROVED_TELEMETRY_ATTRIBUTE_KEYS = {
     "dequeue_timeout_seconds",
     "dependency",
     "duration_ms",
+    "clarification_required",
+    "deduplicated",
     "element_count",
+    "enqueue_job",
     "environment",
     "error_type",
     "failure_class",
@@ -86,8 +89,17 @@ APPROVED_TELEMETRY_ATTRIBUTE_KEYS = {
     "parser_provider",
     "path",
     "request_id",
+    "required_permission",
+    "retrieved_count",
     "route",
+    "scope_mode",
+    "scope_version",
     "selected_count",
+    "included_count",
+    "history_count",
+    "source_token_count",
+    "history_token_count",
+    "summary_token_count",
     "stage",
     "status_class",
     "status_code",
@@ -95,6 +107,117 @@ APPROVED_TELEMETRY_ATTRIBUTE_KEYS = {
     "strategy_version",
     "trace_id",
 }
+
+# Exported application events are an interface, not free-form log messages.
+# Keep every event name and field set reviewable so a caller cannot accidentally
+# turn a customer value into a telemetry attribute.
+EVENT_ATTRIBUTE_SCHEMA: dict[str, frozenset[str]] = {
+    "api_starting": frozenset({"environment"}),
+    "api_clients_initialized": frozenset(),
+    "api_stopped": frozenset(),
+    "request_completed": frozenset(
+        {"method", "route", "status_code", "duration_ms", "outcome"}
+    ),
+    "unhandled_exception": frozenset({"outcome", "failure_class", "error_type"}),
+    "auth0_token_decode_failed": frozenset({"outcome", "failure_class", "error_type"}),
+    "auth0_permission_denied": frozenset({"outcome", "required_permission"}),
+    "rate_limit_dependency_unavailable": frozenset(
+        {"route", "failure_class", "outcome"}
+    ),
+    "rate_limit_exceeded": frozenset({"route", "outcome"}),
+    "chat_context_selected": frozenset(
+        {
+            "retrieved_count",
+            "included_count",
+            "history_count",
+            "source_token_count",
+            "history_token_count",
+            "summary_token_count",
+            "clarification_required",
+            "scope_mode",
+            "scope_version",
+            "outcome",
+        }
+    ),
+    "chat_retrieval_completed": frozenset(
+        {"retrieved_count", "included_count", "scope_mode", "scope_version", "outcome"}
+    ),
+    "chat_generation_completed": frozenset({"scope_mode", "scope_version", "outcome"}),
+    "document_upload_accepted": frozenset({"deduplicated", "enqueue_job", "outcome"}),
+    "ingestion_queue_enqueue_failed": frozenset(
+        {"outcome", "failure_class", "error_type"}
+    ),
+    "ingestion_lifecycle_fenced": frozenset({"outcome", "failure_class"}),
+    "ingestion_queue_unavailable_using_database_fallback": frozenset(
+        {"outcome", "failure_class", "error_type"}
+    ),
+    "ingestion_worker_recovered_stuck_jobs": frozenset({"count", "outcome"}),
+    "ingestion_queue_invalid_job_id": frozenset(
+        {"outcome", "failure_class", "error_type"}
+    ),
+    "ingestion_retry_queue_unavailable": frozenset(
+        {"outcome", "failure_class", "error_type"}
+    ),
+    "ingestion_worker_unexpected_failure": frozenset(
+        {"outcome", "failure_class", "error_type"}
+    ),
+    "embedding_provider_retry_exhausted": frozenset(
+        {"outcome", "failure_class", "error_type", "attempts"}
+    ),
+    "vector_upsert_retry_exhausted": frozenset(
+        {"outcome", "failure_class", "error_type", "attempts"}
+    ),
+    "processing_ingestion_job": frozenset({"attempts", "count", "outcome"}),
+    "ingestion_queue_startup_unavailable_using_database_fallback": frozenset(
+        {"outcome", "failure_class", "error_type"}
+    ),
+    "ingestion_worker_started": frozenset(
+        {"dequeue_timeout_seconds", "max_attempts", "outcome"}
+    ),
+    "ingestion_queue_close_failed": frozenset(
+        {"outcome", "failure_class", "error_type"}
+    ),
+    "purge_worker_recovered_stuck_jobs": frozenset({"count", "outcome"}),
+    "purge_job_retryable": frozenset(
+        {"count", "attempts", "failure_class", "error_type", "outcome"}
+    ),
+    "purge_job_terminal_failed": frozenset(
+        {"count", "attempts", "failure_class", "error_type", "outcome"}
+    ),
+    "purge_job_complete": frozenset({"count", "attempts", "outcome"}),
+    "unclassified_event": frozenset(),
+}
+
+APPLICATION_FAILURE_CLASSES = frozenset(
+    {
+        "authentication",
+        "configuration",
+        "database",
+        "generation",
+        "pinecone",
+        "redis",
+        "validation",
+        "rate_limited",
+        "timeout",
+        "unavailable",
+        "lifecycle_fence",
+        "unknown",
+    }
+)
+SAFE_ERROR_TYPES = frozenset(
+    {
+        "AuthenticationError",
+        "ConfigurationError",
+        "ConnectionError",
+        "DatabaseError",
+        "JWTError",
+        "PineconeException",
+        "ProgrammingError",
+        "RedisError",
+        "TimeoutError",
+        "ValueError",
+    }
+)
 
 RETRIEVAL_OPERATIONAL_THRESHOLDS = {
     "lexical_timeout_rate": 0.02,
@@ -209,6 +332,59 @@ def sanitize_telemetry_attributes(fields: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _safe_failure_class(value: Any) -> str:
+    return value if value in APPLICATION_FAILURE_CLASSES else "unknown"
+
+
+def _safe_error_type(value: Any) -> str:
+    return value if value in SAFE_ERROR_TYPES else "unknown"
+
+
+def sanitize_event_attributes(
+    event: str, fields: dict[str, Any]
+) -> tuple[str, dict[str, Any]]:
+    """Normalize a cataloged event and retain only its approved safe fields."""
+    safe_event = event if event in EVENT_ATTRIBUTE_SCHEMA else "unclassified_event"
+    allowed = EVENT_ATTRIBUTE_SCHEMA[safe_event]
+    safe_fields = sanitize_telemetry_attributes(fields)
+    result: dict[str, Any] = {}
+    for key, value in safe_fields.items():
+        if key not in allowed:
+            continue
+        if key == "failure_class":
+            result[key] = _safe_failure_class(value)
+        elif key == "error_type":
+            result[key] = _safe_error_type(value)
+        else:
+            result[key] = value
+    return safe_event, result
+
+
+def classify_application_failure(exc: Exception) -> str:
+    """Classify an exception without preserving its message or payload."""
+    type_name = type(exc).__name__.casefold()
+    module_name = type(exc).__module__.casefold()
+    if isinstance(exc, ValueError) or "validation" in type_name:
+        return "validation"
+    if "jwt" in type_name or "auth" in type_name or "permission" in type_name:
+        return "authentication"
+    if "redis" in type_name or "redis" in module_name:
+        return "redis"
+    if "pinecone" in type_name or "pinecone" in module_name:
+        return "pinecone"
+    if (
+        "database" in type_name
+        or "sqlalchemy" in module_name
+        or "asyncpg" in module_name
+    ):
+        return "database"
+    if "configuration" in type_name or "settings" in type_name:
+        return "configuration"
+    if "generation" in type_name or "openai" in module_name:
+        return "generation"
+    return "unknown"
+
+
 def initialize_observability(settings: Any) -> None:
     """Configure OTLP exporters for the internal collector when enabled.
 
@@ -309,8 +485,7 @@ def emit_safe_otlp_log(
     destination = otlp_logger if otlp_logger is not None else _otlp_event_logger
     if destination is None:
         return
-    attributes = sanitize_telemetry_attributes(fields or {})
-    attributes.pop("request_id", None)
+    safe_event, attributes = sanitize_event_attributes(event, fields or {})
     try:
         destination.emit(
             LogRecord(
@@ -319,9 +494,9 @@ def emit_safe_otlp_log(
                 context=get_current(),
                 severity_number=_otlp_severity(level),
                 severity_text=logging.getLevelName(level),
-                body=_safe_otlp_event_name(event),
+                body=safe_event,
                 attributes=attributes,
-                event_name=_safe_otlp_event_name(event),
+                event_name=safe_event,
             )
         )
     except Exception:
@@ -641,10 +816,16 @@ def lifecycle_event(
     level: int = logging.INFO,
     **fields: Any,
 ) -> None:
-    """Emit a structured event using only caller-supplied non-sensitive fields."""
-    safe_fields = sanitize_telemetry_attributes(fields)
-    logger.log(level, event, extra=safe_fields)
-    emit_safe_otlp_log(event, level=level, fields=safe_fields)
+    """Emit a cataloged event to local JSON and the safe OTLP bridge."""
+    safe_event, safe_fields = sanitize_event_attributes(event, fields)
+    local_fields = dict(safe_fields)
+    request_id = fields.get("request_id")
+    if isinstance(request_id, str) and len(request_id) <= 128:
+        # Support correlation is intentionally local-only. OTLP receives trace
+        # context instead and never indexes this unbounded client value.
+        local_fields["request_id"] = request_id
+    logger.log(level, safe_event, extra=local_fields)
+    emit_safe_otlp_log(safe_event, level=level, fields=safe_fields)
 
 
 def retrieval_event(logger: logging.Logger, event: str, **fields: Any) -> None:

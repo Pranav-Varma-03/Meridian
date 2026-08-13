@@ -1,5 +1,6 @@
 import json
 import logging
+from pathlib import Path
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -8,8 +9,10 @@ from app import main as main_module
 from app.core import observability
 from app.core.observability import (
     APPROVED_TELEMETRY_ATTRIBUTE_KEYS,
+    EVENT_ATTRIBUTE_SCHEMA,
     RETRIEVAL_OPERATIONAL_THRESHOLDS,
     SecretSafeJsonFormatter,
+    classify_application_failure,
     classify_provider_failure,
     normalize_rag_stage,
     normalize_rag_stage_outcome,
@@ -19,6 +22,7 @@ from app.core.observability import (
     record_rag_stage_observation,
     record_retrieval_observation,
     record_worker_job_observation,
+    sanitize_event_attributes,
     sanitize_telemetry_attributes,
 )
 
@@ -66,6 +70,43 @@ def test_telemetry_attributes_allow_only_bounded_safe_schema() -> None:
 
     assert attributes == {"mode": "hybrid", "status_code": 200}
     assert "document_id" not in APPROVED_TELEMETRY_ATTRIBUTE_KEYS
+
+
+def test_cataloged_event_retains_only_its_permitted_attributes() -> None:
+    assert "chat_context_selected" in EVENT_ATTRIBUTE_SCHEMA
+
+    event, attributes = sanitize_event_attributes(
+        "chat_context_selected",
+        {
+            "retrieved_count": 12,
+            "included_count": 4,
+            "clarification_required": False,
+            "query": "query-canary-must-not-export",
+            "document_id": "document-canary-must-not-export",
+            "arbitrary_extra": "must-not-export",
+        },
+    )
+
+    assert event == "chat_context_selected"
+    assert attributes == {
+        "retrieved_count": 12,
+        "included_count": 4,
+        "clarification_required": False,
+    }
+
+
+def test_unknown_event_is_normalized_and_emits_no_attributes() -> None:
+    event, attributes = sanitize_event_attributes(
+        "document-123-canary", {"status_code": 200}
+    )
+
+    assert event == "unclassified_event"
+    assert attributes == {}
+
+
+def test_application_failure_classification_is_safe_and_bounded() -> None:
+    assert classify_application_failure(ValueError("query-canary")) == "validation"
+    assert classify_application_failure(RuntimeError("query-canary")) == "unknown"
 
 
 def test_provider_failure_classification_is_bounded() -> None:
@@ -130,6 +171,59 @@ def test_rag_stage_observations_bound_unknown_stage_labels() -> None:
         outcome="success",
         duration_ms=1.0,
     )
+
+
+def test_token_shaped_canary_cannot_become_a_metric_or_trace_attribute(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    metric_attributes: list[dict[str, object]] = []
+    trace_events: list[dict[str, object]] = []
+
+    class _Metric:
+        def add(self, _value: int, attributes: dict[str, object]) -> None:
+            metric_attributes.append(attributes)
+
+        def record(self, _value: float, attributes: dict[str, object]) -> None:
+            metric_attributes.append(attributes)
+
+    class _Span:
+        def add_event(self, _name: str, attributes: dict[str, object]) -> None:
+            trace_events.append(attributes)
+
+    token_canary = "eyJ-token-canary-must-not-export"
+    monkeypatch.setattr(observability, "_rag_stage_operations", _Metric())
+    monkeypatch.setattr(observability, "_rag_stage_latency", _Metric())
+    monkeypatch.setattr(
+        observability.trace, "get_current_span", lambda *_args, **_kwargs: _Span()
+    )
+
+    record_rag_stage_observation(
+        stage=token_canary, outcome=token_canary, duration_ms=1.0
+    )
+
+    assert metric_attributes
+    assert trace_events == [
+        {
+            "stage": "unknown",
+            "outcome": "unknown",
+            "degraded": False,
+            "duration_ms": 1.0,
+        }
+    ]
+    assert token_canary not in repr(metric_attributes)
+    assert token_canary not in repr(trace_events)
+
+
+def test_alloy_configuration_retains_log_redaction_and_fail_open_guards() -> None:
+    config = (
+        Path(__file__).parents[3] / "observability" / "alloy" / "config.alloy"
+    ).read_text()
+
+    for field in ("token", "authorization", "query", "content", "request_id"):
+        assert f'key    = "{field}"' in config
+    assert "Len(body) > 512" in config
+    assert "send_batch_size = 512" in config
+    assert "block_on_overflow = false" in config
 
 
 def test_rag_stage_observation_adds_a_correlated_trace_event(
@@ -221,7 +315,7 @@ def test_otlp_log_bridge_exports_only_allowlisted_attributes() -> None:
     assert hasattr(observability, "emit_safe_otlp_log")
     destination = CapturingOtelLogger()
     observability.emit_safe_otlp_log(
-        "chat_completed",
+        "request_completed",
         level=logging.INFO,
         fields={
             "status_code": 200,
@@ -236,7 +330,7 @@ def test_otlp_log_bridge_exports_only_allowlisted_attributes() -> None:
 
     assert len(destination.records) == 1
     record = destination.records[0]
-    assert record.body == "chat_completed"
+    assert record.body == "request_completed"
     assert record.attributes == {"status_code": 200}
     serialized = f"{record.body} {record.attributes}"
     assert "canary-must-not-export" not in serialized

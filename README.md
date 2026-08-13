@@ -100,6 +100,9 @@ and does not attach a generic OTLP handler to the root logger. Never place `OTEL
 Meridian's `.env`. Those values are owned by Alloy's host-service environment.
 See [the Alloy host guide](observability/alloy/README.md) and the
 [Swagger-first verification guide](ManualTestGuide/GrafanaObservability.md).
+Application lifecycle logs additionally follow the reviewed
+[structured logging event catalog](ManualTestGuide/Structured_Logging_Event_Catalog.md);
+use its Swagger guide when validating a logging change.
 
 ### 2.1) Web API boundary
 

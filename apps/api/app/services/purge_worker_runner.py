@@ -37,6 +37,7 @@ async def run_worker_loop() -> None:
                     "purge_worker_recovered_stuck_jobs",
                     level=logging.WARNING,
                     count=recovered,
+                    outcome="recovered",
                 )
             job = await purge_worker.claim_next_purge_job(session)
             if job is not None:

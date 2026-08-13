@@ -405,35 +405,30 @@ async def chat(
     )
     included_sources = assembly.included_sources if assembly is not None else []
     normalized_sources = [source.citation() for source in included_sources]
-    logger.info(
+    lifecycle_event(
+        logger,
         "chat_context_selected",
-        extra={
-            "request_id": getattr(request.state, "request_id", "unknown"),
-            "conversation_id": str(conversation.id),
-            "retrieved_source_count": len(sources),
-            "included_source_count": len(included_sources),
-            "included_history_count": len(assembly.included_history)
-            if assembly is not None
-            else 0,
-            "included_summary": bool(assembly and assembly.included_summary),
-            "input_budget_tokens": assembly.input_budget_tokens
-            if assembly is not None
-            else 0,
-            "source_tokens": assembly.source_tokens if assembly is not None else 0,
-            "history_tokens": assembly.history_tokens if assembly is not None else 0,
-            "summary_tokens": assembly.summary_tokens if assembly is not None else 0,
-            "rewrite_requested_clarification": rewrite.needs_clarification,
-        },
+        request_id=getattr(request.state, "request_id", "unknown"),
+        retrieved_count=len(sources),
+        included_count=len(included_sources),
+        history_count=len(assembly.included_history) if assembly is not None else 0,
+        source_token_count=assembly.source_tokens if assembly is not None else 0,
+        history_token_count=assembly.history_tokens if assembly is not None else 0,
+        summary_token_count=assembly.summary_tokens if assembly is not None else 0,
+        clarification_required=rewrite.needs_clarification,
+        scope_mode=effective_scope.mode.value,
+        scope_version=effective_scope.version,
+        outcome="selected",
     )
     lifecycle_event(
         logger,
         "chat_retrieval_completed",
         request_id=getattr(request.state, "request_id", "unknown"),
-        conversation_id=str(conversation.id),
-        retrieval_scope_mode=effective_scope.mode.value,
-        retrieval_scope_version=effective_scope.version,
-        retrieved_source_count=len(sources),
-        included_source_count=len(included_sources),
+        scope_mode=effective_scope.mode.value,
+        scope_version=effective_scope.version,
+        retrieved_count=len(sources),
+        included_count=len(included_sources),
+        outcome="completed",
     )
 
     async def generate() -> AsyncIterator[str]:
@@ -523,9 +518,8 @@ async def chat(
             logger,
             "chat_generation_completed",
             request_id=getattr(request.state, "request_id", "unknown"),
-            conversation_id=str(conversation.id),
-            retrieval_scope_mode=effective_scope.mode.value,
-            retrieval_scope_version=effective_scope.version,
+            scope_mode=effective_scope.mode.value,
+            scope_version=effective_scope.version,
             outcome="success",
         )
         yield _sse({"type": "sources", "content": normalized_sources})

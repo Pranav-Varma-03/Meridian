@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.auth import get_current_user, require_document_reingest_permission
 from app.core.config import get_settings
 from app.core.database import get_db_session
+from app.core.observability import classify_application_failure, lifecycle_event
 from app.core.rate_limits import require_rate_limit
 from app.models.entities import ReingestionReason, User
 from app.schemas import (
@@ -161,13 +162,14 @@ async def queue_ingestion(
                 queue_key=settings.ingestion_queue_key,
                 job_id=result.job.id,
             )
-        except Exception:
-            logger.exception(
-                "Failed to enqueue ingestion job to Redis",
-                extra={
-                    "job_id": str(result.job.id),
-                    "document_id": str(result.document.id),
-                },
+        except Exception as exc:
+            lifecycle_event(
+                logger,
+                "ingestion_queue_enqueue_failed",
+                level=logging.WARNING,
+                outcome="deferred_to_database_fallback",
+                failure_class=classify_application_failure(exc),
+                error_type=type(exc).__name__,
             )
 
     return IngestAcceptedResponse(

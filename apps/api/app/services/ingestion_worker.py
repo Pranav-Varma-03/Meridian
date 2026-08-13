@@ -9,7 +9,11 @@ from redis.exceptions import RedisError
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.observability import record_worker_job_observation
+from app.core.observability import (
+    classify_application_failure,
+    lifecycle_event,
+    record_worker_job_observation,
+)
 from app.models.entities import (
     Document,
     DocumentIngestionGeneration,
@@ -143,14 +147,11 @@ async def ensure_claimed_job_processable(
         error_message="Ingestion fenced by document lifecycle transition",
     )
     await session.commit()
-    logger.info(
+    lifecycle_event(
+        logger,
         "ingestion_lifecycle_fenced",
-        extra={
-            "job_id": str(job.id),
-            "document_id": str(document.id),
-            "generation_id": str(generation.id),
-            "failure_class": "lifecycle_fence",
-        },
+        outcome="fenced",
+        failure_class="lifecycle_fence",
     )
     return False
 
@@ -176,9 +177,13 @@ async def dequeue_ingestion_job(
         # Redis is only a wake-up channel. A transient blocking-read timeout
         # must not stop the worker because queued Postgres jobs are claimed by
         # the durable fallback immediately below.
-        logger.warning(
+        lifecycle_event(
+            logger,
             "ingestion_queue_unavailable_using_database_fallback",
-            extra={"error_type": type(exc).__name__},
+            level=logging.WARNING,
+            outcome="database_fallback",
+            failure_class="redis",
+            error_type=type(exc).__name__,
         )
         return None
     if result is None:
@@ -187,8 +192,15 @@ async def dequeue_ingestion_job(
     _key, value = result
     try:
         return uuid.UUID(value)
-    except ValueError:
-        logger.warning("Invalid ingestion job id in queue", extra={"raw_value": value})
+    except ValueError as exc:
+        lifecycle_event(
+            logger,
+            "ingestion_queue_invalid_job_id",
+            level=logging.WARNING,
+            outcome="discarded",
+            failure_class="validation",
+            error_type=type(exc).__name__,
+        )
         return None
 
 
@@ -488,8 +500,12 @@ async def recover_stuck_ingestion_jobs(
             )
     if recovered:
         await session.commit()
-        logger.warning(
-            "ingestion_worker_recovered_stuck_jobs", extra={"count": recovered}
+        lifecycle_event(
+            logger,
+            "ingestion_worker_recovered_stuck_jobs",
+            level=logging.WARNING,
+            count=recovered,
+            outcome="recovered",
         )
     else:
         await session.rollback()
@@ -560,9 +576,13 @@ async def process_next_ingestion_job(
                     job_id=claimed_job_id,
                 )
             except RedisError as enqueue_exc:
-                logger.warning(
+                lifecycle_event(
+                    logger,
                     "ingestion_retry_queue_unavailable",
-                    extra={"error_type": type(enqueue_exc).__name__},
+                    level=logging.WARNING,
+                    outcome="database_fallback",
+                    failure_class="redis",
+                    error_type=type(enqueue_exc).__name__,
                 )
         else:
             record_worker_job_observation(
@@ -588,11 +608,15 @@ async def process_next_ingestion_job(
             failure_class="non_retryable",
         )
         return True
-    except Exception:
+    except Exception as exc:
         await session.rollback()
-        logger.exception(
-            "Unexpected ingestion worker error",
-            extra={"job_id": str(claimed_job_id)},
+        lifecycle_event(
+            logger,
+            "ingestion_worker_unexpected_failure",
+            level=logging.ERROR,
+            outcome="retrying",
+            failure_class=classify_application_failure(exc),
+            error_type=type(exc).__name__,
         )
         requeued = await mark_ingestion_job_retry_or_failed(
             session,
@@ -617,9 +641,13 @@ async def process_next_ingestion_job(
                     job_id=claimed_job_id,
                 )
             except RedisError as enqueue_exc:
-                logger.warning(
+                lifecycle_event(
+                    logger,
                     "ingestion_retry_queue_unavailable",
-                    extra={"error_type": type(enqueue_exc).__name__},
+                    level=logging.WARNING,
+                    outcome="database_fallback",
+                    failure_class="redis",
+                    error_type=type(enqueue_exc).__name__,
                 )
         else:
             record_worker_job_observation(

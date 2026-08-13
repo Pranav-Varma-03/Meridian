@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
 from app.core.database import get_db_session
+from app.core.observability import classify_application_failure, lifecycle_event
 from app.models.entities import User
 from app.services.users import InvalidUserClaimsError, ensure_user_from_claims
 
@@ -81,9 +82,13 @@ async def verify_auth0_access_token(token: str) -> dict[str, Any]:
             issuer=issuer,
         )
     except JWTError as exc:
-        logger.warning(
+        lifecycle_event(
+            logger,
             "auth0_token_decode_failed",
-            extra={"reason": str(exc)},
+            level=logging.WARNING,
+            outcome="denied",
+            failure_class=classify_application_failure(exc),
+            error_type=type(exc).__name__,
         )
         raise HTTPException(status_code=401, detail="Invalid or expired token") from exc
 
@@ -98,8 +103,8 @@ async def get_current_user_claims(
         token = credentials.credentials
     else:
         token = _extract_bearer_token(request)
-    # Development-only debug output (requested): print bearer token with
-    # one empty line above and one empty line below.
+    # Temporary local-development debug output. Remove before any shared,
+    # staging, or production deployment because bearer tokens are credentials.
     print(f"\n{token}\n")
     return await verify_auth0_access_token(token)
 
@@ -119,12 +124,13 @@ def require_permission(permission: str) -> Callable[..., Any]:
         claims: dict[str, Any] = Depends(get_current_user_claims),
     ) -> dict[str, Any]:
         if permission not in _normalized_permissions(claims):
-            logger.warning(
+            lifecycle_event(
+                logger,
                 "auth0_permission_denied",
-                extra={
-                    "request_id": getattr(request.state, "request_id", "unknown"),
-                    "required_permission": permission,
-                },
+                level=logging.WARNING,
+                request_id=getattr(request.state, "request_id", "unknown"),
+                required_permission=permission,
+                outcome="denied",
             )
             raise HTTPException(status_code=403, detail="Insufficient permissions")
         return claims
